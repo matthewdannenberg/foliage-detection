@@ -2,7 +2,7 @@ Data Downloading and Initial Processing Instructions
 
 1)  NLCD Land Cover (CONUS) Data
         Can be downloaded directly from https://www.mrlc.gov/data
-            -   most recently done so on 3/13/2026
+            -   most recently done so on 3/27/2026
         To shrink file size, data clipped down to a bounding box surrounding Vermont by clip_nlcd.py
 
     ** From root project directory, run command
@@ -23,7 +23,7 @@ Data Downloading and Initial Processing Instructions
 3)  USA National Phenology Network Data
         Programmatically found, preprocessed, and downloaded by download_npn.py
             -   most recent download on 3/27/2026
-        Individual observations saved in /raw/observer_reports as npn_vermont.csv
+        Individual observations saved in data/raw/observer_reports as npn_vermont.csv
         Based on specific phenology observed (colored leaves/falling leaves) each observation is labeled as pre-transition/early/peak/late
 
     ** From root project directory, run command

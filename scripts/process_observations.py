@@ -251,6 +251,9 @@ def consolidate(df: pd.DataFrame) -> pd.DataFrame:
 
     Returns a DataFrame with OBSERVATION_COLUMNS schema.
     """
+    if df.empty:
+        return pd.DataFrame(columns=OBSERVATION_COLUMNS)
+    
     # Snap coordinates
     df = df.copy()
     d = CONSOLIDATION_COORD_DECIMALS
