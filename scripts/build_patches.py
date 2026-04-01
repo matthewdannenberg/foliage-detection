@@ -4,10 +4,12 @@ build_patches.py — Extract labelled patches from processed Landsat stacks.
 Combines two label sources:
 
   1. OBSERVER-BASED PATCHES
-     Reads data/processed/observations/observations.csv, matches each
-     observation to the nearest processed Landsat stack within ±3 days,
-     and extracts a (NUM_CHANNELS, PATCH_SIZE, PATCH_SIZE) patch centred
-     on the observation's pixel location.
+     Iterates over processed Landsat tiles. For each tile, finds all
+     observations within ±5 days of its acquisition date, re-consolidates
+     them by location (plurality vote within the time window), and extracts
+     one patch per consolidated location. This tiles→observations approach
+     ensures multiple nearby observations are combined into a single
+     high-quality patch rather than producing duplicate noisy patches.
 
   2. SYNTHETIC PATCHES
      Generates additional no_transition labels from early August tiles
@@ -40,7 +42,7 @@ import json
 import random
 import sys
 from collections import Counter, defaultdict
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import h5py
@@ -56,38 +58,30 @@ from config import (
     ALL_CHANNEL_NAMES,
     CONSOLIDATION_COORD_DECIMALS,
     DATA_PROCESSED,
-    NLCD_RAW,
     NORM_STATS_PATH,
     NUM_CHANNELS,
     NUM_CLASSES,
     OBSERVATIONS_DIR,
-    OBSERVER_SCENE_MAX_DAYS,
     PATCH_SIZE,
     PATCHES_DIR,
+    RANDOM_SEED,
     STAGE_NAMES,
     STAGES,
+    SYNTHETIC_LATE_CONFIDENCE,
+    SYNTHETIC_LATE_WINDOW,
+    SYNTHETIC_NO_TRANSITION_CONFIDENCE,
+    SYNTHETIC_NO_TRANSITION_WINDOW,
     TARGET_CRS,
     TARGET_RESOLUTION,
+    TILE_OBS_WINDOW_DAYS,
     TRAIN_YEARS,
     VAL_YEARS,
     TEST_YEARS,
 )
 from data.nlcd import NLCDLayer
+from process_observations import consolidate
 
 PROCESSED_LANDSAT = DATA_PROCESSED / "landsat"
-
-# Heuristic confidence values for synthetic labels
-SYNTHETIC_NO_TRANSITION_CONFIDENCE = 0.95
-SYNTHETIC_LATE_CONFIDENCE          = 0.80
-
-# Date windows for synthetic label generation
-# Aug 1–20: virtually no Vermont foliage change → no_transition
-SYNTHETIC_NO_TRANSITION_MONTH_DAY = [(8, 1),  (8, 20)]
-# Nov 10–30: well past peak, significant leaf drop → late
-SYNTHETIC_LATE_MONTH_DAY          = [(11, 10), (11, 30)]
-
-# Random seed for reproducible synthetic patch sampling
-RANDOM_SEED = 42
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +165,25 @@ def _extract_patch(cube: np.ndarray, row: int, col: int, half: int) -> np.ndarra
     return cube[:, row - half: row + half, col - half: col + half].copy()
 
 
+def _fill_nan(patch: np.ndarray) -> np.ndarray:
+    """Fill NaN values in a (C, H, W) patch with per-channel mean of valid pixels.
+
+    Only applied to observer patches where the centre pixel is valid but
+    surrounding context pixels may be cloud-masked. The fill value is
+    spectrally neutral — the channel mean of whatever valid pixels exist
+    in the patch. Falls back to 0.0 if an entire channel is NaN.
+
+    Synthetic patches use strict NaN rejection instead and never reach this.
+    """
+    patch = patch.copy()
+    for c in range(patch.shape[0]):
+        nan_mask = np.isnan(patch[c])
+        if nan_mask.any():
+            valid_mean = np.nanmean(patch[c])
+            patch[c][nan_mask] = valid_mean if np.isfinite(valid_mean) else 0.0
+    return patch
+
+
 # ---------------------------------------------------------------------------
 # Coordinate → pixel conversion
 # ---------------------------------------------------------------------------
@@ -206,26 +219,30 @@ def _index_processed_tiles() -> dict[str, list[Path]]:
     return index
 
 
-def _find_nearest_tiles(
-    obs_date: date,
-    tile_index: dict[str, list[Path]],
-    max_days: int = OBSERVER_SCENE_MAX_DAYS,
-) -> list[Path]:
-    """Return all tile paths within max_days of obs_date, sorted by proximity."""
-    candidates = []
-    for delta in range(0, max_days + 1):
-        for sign in ([0] if delta == 0 else [1, -1]):
-            d = obs_date + timedelta(days=delta * sign)
-            key = d.isoformat()
-            if key in tile_index:
-                for path in tile_index[key]:
-                    candidates.append((delta, path))
-    candidates.sort(key=lambda x: x[0])
-    return [p for _, p in candidates]
+def _observations_for_tile(
+    tile_date: date,
+    observations: pd.DataFrame,
+    window_days: int = TILE_OBS_WINDOW_DAYS,
+) -> pd.DataFrame:
+    """Return all observations within window_days of tile_date.
+
+    Also adds a 'stage_int' column (integer stage index) needed by
+    consolidate(), and a 'confidence' column if not already present.
+    """
+    obs_dates = pd.to_datetime(observations["date"]).dt.date
+    mask = obs_dates.apply(lambda d: abs((d - tile_date).days) <= window_days)
+    subset = observations[mask].copy()
+    if subset.empty:
+        return subset
+
+    # consolidate() expects stage_int — the observations CSV stores
+    # stage as an integer already, so just rename it
+    subset["stage_int"] = subset["stage"].astype(int)
+    return subset
 
 
 # ---------------------------------------------------------------------------
-# Observer-based patch extraction
+# Observer-based patch extraction  (tiles → observations)
 # ---------------------------------------------------------------------------
 
 def extract_observer_patches(
@@ -234,7 +251,16 @@ def extract_observer_patches(
     dem_path: Path,
     nlcd_cache: dict[int, NLCDLayer],
 ) -> list[dict]:
-    """Extract patches at observer locations matched to nearby tiles.
+    """Extract patches by iterating tiles and matching nearby observations.
+
+    For each processed tile:
+      1. Find all observations within ±TILE_OBS_WINDOW_DAYS days.
+      2. Re-consolidate by snapped location (plurality vote within window).
+      3. Extract one patch per consolidated location.
+
+    This approach ensures that multiple observations near the same site
+    across several days are combined into a single high-quality patch
+    rather than producing duplicate noisy patches.
 
     Returns a list of record dicts with keys:
         patch, stage, confidence, year, source, label_source
@@ -242,52 +268,109 @@ def extract_observer_patches(
     records = []
     half = PATCH_SIZE // 2
     skipped = Counter()
+    tiles_with_obs = 0
 
-    for _, row in tqdm(observations.iterrows(), total=len(observations),
-                       desc="Observer patches", unit="obs"):
+    # Collect all unique tile paths sorted by date for clean progress display
+    all_tile_paths = sorted(
+        {p for paths in tile_index.values() for p in paths},
+        key=lambda p: p.stem,
+    )
+
+    for tile_path in tqdm(all_tile_paths, desc="Observer patches", unit="tile"):
+        # Parse tile date
+        parts = tile_path.stem.replace("_stack", "").split("_")
+        if len(parts) < 4 or len(parts[3]) != 8:
+            continue
+        raw = parts[3]
         try:
-            obs_date = date.fromisoformat(str(row["date"]))
+            tile_date = date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
         except ValueError:
-            skipped["bad_date"] += 1
             continue
 
-        tile_paths = _find_nearest_tiles(obs_date, tile_index)
-        if not tile_paths:
-            skipped["no_nearby_tile"] += 1
+        year = tile_date.year
+
+        # Find observations near this tile in time
+        tile_obs = _observations_for_tile(tile_date, observations)
+        if tile_obs.empty:
             continue
 
-        stage      = int(row["stage"])
-        confidence = float(row["confidence"])
-        source     = str(row.get("source", ""))
+        # Spatial filter — keep only observations whose coordinates fall
+        # within this tile's bounding box. Read bounds without loading data.
+        with rasterio.open(tile_path) as src:
+            bounds    = src.bounds
+            transform = src.transform
+            H, W      = src.height, src.width
 
-        # Try each nearby tile until we get a valid patch
-        matched = False
-        for tile_path in tile_paths:
-            with rasterio.open(tile_path) as src:
-                spectral  = src.read().astype(np.float32)   # (9, H, W)
-                transform = src.transform
-                H, W      = src.height, src.width
+        # Convert tile bounds from EPSG:5070 to WGS84 for comparison
+        # with observation lat/lon (which are in WGS84)
+        _bounds_transformer = Transformer.from_crs(
+            TARGET_CRS, "EPSG:4326", always_xy=True
+        )
+        left_lon,  bottom_lat = _bounds_transformer.transform(bounds.left,  bounds.bottom)
+        right_lon, top_lat    = _bounds_transformer.transform(bounds.right, bounds.top)
 
-            year = int(tile_path.parts[-2])  # .../landsat/{year}/tile_stack.tif
+        spatial_mask = (
+            (tile_obs["latitude"]  >= bottom_lat) &
+            (tile_obs["latitude"]  <= top_lat)    &
+            (tile_obs["longitude"] >= left_lon)   &
+            (tile_obs["longitude"] <= right_lon)
+        )
+        tile_obs = tile_obs[spatial_mask]
+        if tile_obs.empty:
+            continue
 
-            # Static layers — build once per tile per NLCD year
-            nlcd = nlcd_cache.setdefault(year, NLCDLayer(year))
-            exclusion_mask     = nlcd.exclusion_mask(transform, (H, W))
-            deciduous_fraction = nlcd.deciduous_fraction(transform, (H, W))
-            elevation          = _load_dem_for_grid(dem_path, transform, (H, W))
-            slope, aspect      = _slope_aspect(elevation)
+        # Re-consolidate within this tile's spatiotemporal window
+        consolidated = consolidate(tile_obs)
+        if consolidated.empty:
+            continue
 
-            cube = _build_cube(spectral, elevation, slope, aspect, deciduous_fraction)
+        tiles_with_obs += 1
+
+        # Load spectral data (bounds/transform already read above)
+        with rasterio.open(tile_path) as src:
+            spectral = src.read().astype(np.float32)   # (9, H, W)
+
+        nlcd = nlcd_cache.setdefault(year, NLCDLayer(year))
+        exclusion_mask     = nlcd.exclusion_mask(transform, (H, W))
+        deciduous_fraction = nlcd.deciduous_fraction(transform, (H, W))
+        elevation          = _load_dem_for_grid(dem_path, transform, (H, W))
+        slope, aspect      = _slope_aspect(elevation)
+        cube               = _build_cube(
+            spectral, elevation, slope, aspect, deciduous_fraction
+        )
+
+        # Extract one patch per consolidated observation location
+        for _, obs_row in consolidated.iterrows():
+            stage      = int(obs_row["stage"])
+            confidence = float(obs_row["confidence"])
+            source     = str(obs_row.get("source", ""))
 
             px_row, px_col = _lonlat_to_rowcol(
-                float(row["longitude"]), float(row["latitude"]), transform
+                float(obs_row["longitude"]),
+                float(obs_row["latitude"]),
+                transform,
             )
 
-            if not _is_valid_patch(cube, px_row, px_col, half, exclusion_mask):
-                skipped["invalid_pixel"] += 1
+            _, H, W = cube.shape
+            in_bounds = (px_row >= half and px_row < H - half and
+                         px_col >= half and px_col < W - half)
+
+            if not in_bounds:
+                skipped["out_of_bounds"] += 1
+                continue
+            if exclusion_mask[px_row, px_col]:
+                skipped["nlcd_excluded"] += 1
                 continue
 
-            patch = _extract_patch(cube, px_row, px_col, half)
+            # For observer patches: only reject if the centre pixel itself
+            # is NaN. Context pixels with NaN (cloud edges etc.) are filled
+            # with per-channel mean rather than discarding the whole patch.
+            centre_spectral = cube[:9, px_row, px_col]
+            if np.isnan(centre_spectral).any():
+                skipped["centre_nan"] += 1
+                continue
+
+            patch = _fill_nan(_extract_patch(cube, px_row, px_col, half))
             records.append({
                 "patch":        patch,
                 "stage":        stage,
@@ -296,12 +379,8 @@ def extract_observer_patches(
                 "source":       source,
                 "label_source": "observer",
             })
-            matched = True
-            break
 
-        if not matched:
-            skipped["no_valid_patch"] += 1
-
+    print(f"  Tiles with nearby observations: {tiles_with_obs}")
     print(f"  Observer patches extracted: {len(records)}")
     if skipped:
         print(f"  Skipped: {dict(skipped)}")
@@ -370,9 +449,9 @@ def generate_synthetic_patches(
         if td.year not in years:
             continue
         for path in paths:
-            if _in_synthetic_window(td, SYNTHETIC_NO_TRANSITION_MONTH_DAY):
+            if _in_synthetic_window(td, SYNTHETIC_NO_TRANSITION_WINDOW):
                 eligible[STAGES["no_transition"]].append(path)
-            elif _in_synthetic_window(td, SYNTHETIC_LATE_MONTH_DAY):
+            elif _in_synthetic_window(td, SYNTHETIC_LATE_WINDOW):
                 eligible[STAGES["late"]].append(path)
 
     for stage_idx, stage_name in [
@@ -517,12 +596,25 @@ def compute_norm_stats(hdf5_path: Path, train_years: list[int]) -> None:
     """Compute per-channel mean/std over training patches and save to JSON.
 
     Statistics computed only on training years to prevent leakage.
+    Falls back to all patches if no training-year patches exist (e.g. during
+    single-year test runs where the year is in val/test rather than train).
     """
     print("[build] Computing normalisation statistics from training patches ...")
     with h5py.File(hdf5_path, "r") as f:
-        all_years    = f["years"][:]
-        train_mask   = np.isin(all_years, train_years)
-        train_patches = f["patches"][train_mask]   # (N_train, C, H, W)
+        all_years     = f["years"][:]
+        train_mask    = np.isin(all_years, train_years)
+        n_train       = int(train_mask.sum())
+
+        if n_train == 0:
+            print(
+                "[build] WARNING: No training-year patches found. "
+                "Computing stats over all patches instead.\n"
+                "  This is expected during single-year test runs.\n"
+                "  Re-run with training years for production use."
+            )
+            train_patches = f["patches"][:]
+        else:
+            train_patches = f["patches"][train_mask]
 
     mean = train_patches.mean(axis=(0, 2, 3)).tolist()
     std  = train_patches.std(axis=(0, 2, 3)).tolist()
@@ -533,7 +625,7 @@ def compute_norm_stats(hdf5_path: Path, train_years: list[int]) -> None:
             "mean":     mean,
             "std":      std,
             "channels": ALL_CHANNEL_NAMES,
-            "n_train":  int(train_mask.sum()),
+            "n_train":  n_train,
         }, f, indent=2)
 
     print(f"[build] Norm stats saved → {NORM_STATS_PATH}")

@@ -6,7 +6,8 @@ Every other module imports from this file rather than hardcoding values.
 
 Landsat data source: Collection 2 ARD (Analysis Ready Data).
 ARD tiles are pre-clipped to a 5000×5000px Albers Equal Area grid (EPSG:5070),
-already terrain-corrected, with consistent tiling across years. 
+already terrain-corrected, with consistent tiling across years. Spectral values
+are identical to Level-2 SR; band numbering and QA conventions are unchanged.
 """
 
 from pathlib import Path
@@ -23,18 +24,21 @@ DATA_RAW         = PROJECT_ROOT / "data" / "raw"
 DATA_PROCESSED   = PROJECT_ROOT / "data" / "processed"
 
 LANDSAT_RAW      = DATA_RAW / "landsat"       # raw ARD tiles (not used in S3 pipeline)
-NLCD_RAW         = DATA_RAW / "nlcd"          # NLCD GeoTIFFs by year
+NLCD_RAW         = DATA_RAW / "nlcd"          # Annual NLCD GeoTIFFs by year
 OBSERVER_RAW     = DATA_RAW / "observer_reports"
 
-PATCHES_DIR      = DATA_PROCESSED / "patches" # HDF5 patch archives
-LABELS_DIR       = DATA_PROCESSED / "labels"  # rasterized label GeoTIFFs
+PATCHES_DIR      = DATA_PROCESSED / "patches"       # HDF5 patch archives
+LABELS_DIR       = DATA_PROCESSED / "labels"        # rasterized label GeoTIFFs
 OBSERVATIONS_DIR = DATA_PROCESSED / "observations"  # standardised observation CSVs
 
 # ---------------------------------------------------------------------------
 # Coordinate reference systems
 # ---------------------------------------------------------------------------
-# TARGET_CRS: working CRS for all processed outputs.
-TARGET_CRS = "EPSG:5070" # (Albers Equal Area Conic, CONUS)
+# EPSG:5070 = NAD83 / Albers Equal Area Conic (CONUS)
+# This is the native CRS of both Landsat ARD tiles and the Annual NLCD,
+# so keeping it as the working CRS avoids unnecessary reprojection and
+# eliminates resampling error when aligning layers.
+TARGET_CRS        = "EPSG:5070"
 TARGET_RESOLUTION = 250  # metres per pixel
 
 # ---------------------------------------------------------------------------
@@ -60,8 +64,7 @@ QA_CIRRUS        = 2
 QA_CLOUD         = 3
 QA_CLOUD_SHADOW  = 4
 QA_SNOW          = 5
-QA_CLEAR         = 6  # band pixel values set to 1 when pixel is clear
-QA_WATER         = 7
+QA_CLEAR         = 6  # set to 1 when pixel is clear
 
 # Bits that, if set, indicate a pixel should be masked out
 QA_MASK_BITS = [QA_FILL, QA_DILATED_CLOUD, QA_CLOUD, QA_CLOUD_SHADOW, QA_SNOW]
@@ -85,14 +88,16 @@ SPECTRAL_INDICES = ["evi2", "ndii", "ndvi"]
 
 # ---------------------------------------------------------------------------
 # NLCD classes used in this project
-# Uses the Annual NLCD product (one file per year, 1985–present)
+# Uses the Annual NLCD product (one file per year, 1985–present).
+# Each Landsat scene year maps directly to the same NLCD year — no
+# nearest-year approximation needed.
 # ---------------------------------------------------------------------------
-NLCD_DECIDUOUS_HIGH  = 41   # Deciduous Forest (>75% deciduous)
-NLCD_MIXED_FOREST    = 43   # Mixed Forest     (25–75% deciduous)
-NLCD_EVERGREEN_HIGH  = 42   # Evergreen Forest (>75% conifer)
+NLCD_DECIDUOUS_HIGH  = 41   # Deciduous Forest (>80% deciduous)
+NLCD_MIXED_FOREST    = 43   # Mixed Forest     (20–80% deciduous)
+NLCD_EVERGREEN_HIGH  = 42   # Evergreen Forest (>80% conifer)
 
-# Classes to INCLUDE — everything else is masked out
-NLCD_INCLUDE_CLASSES = [NLCD_DECIDUOUS_HIGH, NLCD_MIXED_FOREST]  # 41, 43
+# Pixels with this NLCD class are hard-masked out of training and inference
+NLCD_INCLUDE_CLASSES = [NLCD_DECIDUOUS_HIGH, NLCD_MIXED_FOREST]
 
 # ---------------------------------------------------------------------------
 # Foliage stage labels
@@ -139,9 +144,14 @@ NORM_STATS_PATH = DATA_PROCESSED / "norm_stats.json"
 # ---------------------------------------------------------------------------
 # ARD tile processing
 # ---------------------------------------------------------------------------
-# Vermont falls within ARD CONUS tiles h028–h029, v004–v005
+# Vermont falls within ARD CONUS tiles h028–h029, v004–v005.
+# Tile indices are zero-padded three-digit strings to match ARD filename format:
+#   e.g. LC08_CU_028004_20150901_...
+# h029v004 covers only a sliver of Vermont's northeast corner — verify against
+# the USGS ARD tile viewer before downloading all four.
 ARD_VERMONT_TILES = [
     ("028", "004"),
+    ("028", "005"),
     ("029", "004"),
     ("029", "005"),
 ]
@@ -205,14 +215,37 @@ TRAIN = {
 OBSERVATION_COLUMNS = [
     "date", "latitude", "longitude", "stage", "confidence", "source", "notes"
 ]
- 
+
 # Coordinate snapping precision for consolidation.
 # 4 decimal places ≈ 11m — fine enough to group same-site observations
 # without accidentally merging distinct nearby locations.
 CONSOLIDATION_COORD_DECIMALS = 4
- 
-# Raw observer report columns (pre-standardisation)
+
+# Raw observer report columns (pre-standardisation, used by download scripts)
 OBSERVER_COLUMNS = ["date", "latitude", "longitude", "stage", "source", "notes"]
- 
+
 # Maximum days between an observation and a matching Landsat tile
-OBSERVER_SCENE_MAX_DAYS = 3
+# (tiles→observations direction: observations within this window of a tile
+# are consolidated and used to label that tile's pixels)
+OBSERVER_SCENE_MAX_DAYS = 5
+
+# ---------------------------------------------------------------------------
+# Patch extraction
+# ---------------------------------------------------------------------------
+
+# Temporal window for tile → observation matching
+TILE_OBS_WINDOW_DAYS = OBSERVER_SCENE_MAX_DAYS   # alias for clarity in build_patches
+
+# Confidence values for synthetic labels
+SYNTHETIC_NO_TRANSITION_CONFIDENCE = 0.95   # Aug 1–20: virtually certain
+SYNTHETIC_LATE_CONFIDENCE          = 0.80   # Nov 10–30: high confidence, some
+                                            # early November ambiguity remains
+
+# Date windows for synthetic label generation (inclusive, month/day tuples)
+# August 1–20: foliage virtually never changing → no_transition
+SYNTHETIC_NO_TRANSITION_WINDOW = ((8, 1),  (8, 20))
+# November 10–30: well past peak, significant leaf drop → late
+SYNTHETIC_LATE_WINDOW          = ((11, 10), (11, 30))
+
+# Random seed for reproducible synthetic patch sampling
+RANDOM_SEED = 42

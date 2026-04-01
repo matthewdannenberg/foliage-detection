@@ -1,13 +1,12 @@
 """
-clip_nlcd.py — Clip a full CONUS Annual NLCD GeoTIFF to the Vermont region.
+clip_nlcd.py — Clip a full CONUS Annual NLCD GeoTIFF to the Northeast region.
 
 After downloading Annual NLCD files from MRLC (https://www.mrlc.gov/data),
-run this script to extract just the Vermont extent and delete the large CONUS
-file. The clipped output is ~1–2 MB versus ~1 GB for the full CONUS raster.
+run this script to extract just the Northeast extent and delete the large CONUS
+file. The clipped output is ~20–40 MB versus ~1 GB for the full CONUS raster.
 
-The clip extent is defined in EPSG:5070 (Albers Equal Area — the NLCD native
-CRS) with a 50km buffer around Vermont's bounding box to ensure no edge
-effects during subsequent reprojection to UTM-18N.
+The clip extent covers Maine through Pennsylvania/New Jersey in EPSG:5070
+(Albers Equal Area — the NLCD native CRS), with a 50km buffer on each side.
 
 Output is written to NLCD_RAW/{year}.tif, matching the convention expected
 by nlcd.py.
@@ -38,15 +37,16 @@ from config import NLCD_RAW
 from pyproj import CRS
 
 # ---------------------------------------------------------------------------
-# Vermont clip extent in EPSG:5070 (Albers Equal Area — NLCD native CRS)
-# Derived from Vermont's geographic bounding box (42.7°N–45.0°N, 73.4°W–71.5°W)
-# converted to Albers, then padded by 50km on each side.
+# Northeast clip extent in EPSG:5070 (Albers Equal Area — NLCD native CRS)
+# Covers Maine through Pennsylvania/New Jersey (all 9 Northeast states used
+# for NPN observation collection), padded by 50km on each side.
+# Derived by projecting state corner coordinates to EPSG:5070.
 # ---------------------------------------------------------------------------
-VERMONT_BOUNDS_ALBERS = {
-    "left":   1_709_000.0,
-    "right":  2_026_000.0,
-    "bottom": 2_358_000.0,
-    "top":    2_746_000.0,
+NORTHEAST_BOUNDS_ALBERS = {
+    "left":   1_200_000.0,   # west of NY/PA western border
+    "right":  2_400_000.0,   # east of Maine coast
+    "bottom": 2_100_000.0,   # south of NJ/PA southern border
+    "top":    3_100_000.0,   # north of Maine northern border
 }
 
 
@@ -79,19 +79,12 @@ def _parse_year(path: Path) -> int:
 # Clipping
 # ---------------------------------------------------------------------------
 
-def clip_to_vermont(
+def clip_to_northeast(
     src_path: Path,
     dst_path: Path,
-    bounds: dict = VERMONT_BOUNDS_ALBERS,
+    bounds: dict = NORTHEAST_BOUNDS_ALBERS,
 ) -> None:
-    """Clip a CONUS NLCD GeoTIFF to the Vermont extent and write to dst_path.
-
-    Args:
-        src_path: Path to the full CONUS Annual NLCD GeoTIFF.
-        dst_path: Output path for the clipped file.
-        bounds:   Clip extent in the source file's CRS (EPSG:5070).
-                  Dict with keys: left, right, bottom, top.
-    """
+    """Clip a CONUS NLCD GeoTIFF to the Northeast extent and write to dst_path."""
     dst_path.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(src_path) as src:
@@ -100,16 +93,8 @@ def clip_to_vermont(
         # CRS validation skipped — files downloaded directly from mrlc.gov are
         # assumed to be in the correct projection.
 
-        # Verify the file is in the expected CRS
-        # expected = CRS.from_epsg(5070)
-        # file_crs = CRS(src.crs.to_wkt())
-        # if not file_crs.equals(expected):
-        #     raise ValueError(
-        #         f"Expected NLCD in EPSG:5070 (Albers), got: {src.crs.to_string()}. "
-        #         "Check that this is an Annual NLCD CONUS file."
-        #     )
-
-        colormap = src.colormap(1)   # read the color table
+        src_crs = src.crs.to_epsg()
+        colormap = src.colormap(1)
 
         # Compute the window corresponding to our bounding box
         window = from_bounds(
@@ -164,7 +149,7 @@ def process_file(src_path: Path, delete_original: bool = True) -> bool:
         src_mb = src_path.stat().st_size / 1e6
         print(f"Processing {src_path.name}  ({src_mb:.0f} MB) → year {year}")
 
-        clip_to_vermont(src_path, dst_path)
+        clip_to_northeast(src_path, dst_path)
 
         if delete_original:
             src_path.unlink()
@@ -179,7 +164,7 @@ def process_file(src_path: Path, delete_original: bool = True) -> bool:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Clip CONUS Annual NLCD files to Vermont extent."
+        description="Clip CONUS Annual NLCD files to Northeast extent."
     )
     p.add_argument(
         "files", nargs="*", type=Path,
@@ -205,7 +190,7 @@ def main() -> None:
 
     files: list[Path] = list(args.files)
     if args.all:
-        files += sorted(args.input_dir.glob("Annual_NLCD_LndCov_*.tif*"))
+        files += sorted(args.input_dir.glob("Annual_NLCD_LndCov_*.tif"))
 
     if not files:
         print(

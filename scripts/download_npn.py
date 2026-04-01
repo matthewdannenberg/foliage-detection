@@ -1,8 +1,10 @@
 """
-download_npn.py — Download USA-NPN fall foliage observations for Vermont.
+download_npn.py — Download USA-NPN fall foliage observations.
 
-Queries the USA-NPN Status and Intensity API for Vermont observations of
-the two relevant fall phenophases across all training/val/test years:
+Queries the USA-NPN Status and Intensity API for observations of the two
+relevant fall phenophases across all training/val/test years. By default
+queries Vermont only; pass --states to expand to the full Northeast or
+any other set of states.
 
     Phenophase 498 — "Colored leaves"
         intensity_value strings map to foliage stages:
@@ -19,12 +21,12 @@ the two relevant fall phenophases across all training/val/test years:
         (lower intensities excluded — some leaf drop occurs even at peak)
 
 Output is the RAW observation CSV saved to:
-    data/raw/observer_reports/npn_vermont.csv
+    data/raw/observer_reports/npn_{region}.csv
 
-This file preserves the original stage as a string name (e.g. "early")
-and includes source metadata in the notes field. It is not intended for
-direct use by the model — run process_observations.py afterward to
-produce the standardised, consolidated, confidence-scored output.
+where {region} is derived from the states queried (e.g. "vermont" or
+"northeast"). This file preserves the original stage as a string name
+and includes source metadata in the notes field. Run
+process_observations.py afterward to produce standardised output.
 
 No API key is required. A request_source (your name) is required by the
 NPN on an honor system basis — set it via --request-source or the
@@ -32,6 +34,7 @@ NPN_REQUEST_SOURCE environment variable.
 
 Usage:
     python scripts/download_npn.py --request-source "Your Name"
+    python scripts/download_npn.py --request-source "Your Name" --states ME NH VT MA NY
     python scripts/download_npn.py --request-source "Your Name" --years 2018 2019
 """
 
@@ -62,12 +65,33 @@ PHENOPHASE_FALLING_LEAVES = 499
 # Months to query — Aug through Nov covers the full transition window
 FALL_MONTHS = {8, 9, 10, 11}
 
-# Seconds to wait between year requests — be polite to the API
+# Seconds to wait between year/state requests — be polite to the API
 REQUEST_DELAY = 1.0
 
-# Vermont bounding box — hard backstop in case state filter is unreliable
-VT_LAT_MIN, VT_LAT_MAX = 42.72, 45.02
-VT_LON_MIN, VT_LON_MAX = -73.44, -71.46
+# Northeast states available for querying
+NORTHEAST_STATES = ["ME", "NH", "VT", "MA", "RI", "CT", "NY", "NJ", "PA"]
+
+# Bounding boxes per state — used as a geographic backstop after API filtering.
+# Bounds are conservative (slightly padded) to avoid clipping border sites.
+STATE_BOUNDS: dict[str, tuple[float, float, float, float]] = {
+    # (lat_min, lat_max, lon_min, lon_max)
+    "ME": (43.05, 47.47, -71.08, -66.95),
+    "NH": (42.69, 45.31, -72.56, -70.61),
+    "VT": (42.72, 45.02, -73.44, -71.46),
+    "MA": (41.23, 42.89, -73.51, -69.93),
+    "RI": (41.15, 42.02, -71.91, -71.12),
+    "CT": (40.95, 42.05, -73.73, -71.79),
+    "NY": (40.50, 45.02, -79.76, -71.86),
+    "NJ": (38.93, 41.36, -75.56, -73.89),
+    "PA": (39.72, 42.27, -80.52, -74.69),
+}
+
+def _region_bounds(states: list[str]) -> tuple[float, float, float, float]:
+    """Return the bounding box enclosing all requested states."""
+    lat_mins, lat_maxs, lon_mins, lon_maxs = zip(
+        *[STATE_BOUNDS[s] for s in states if s in STATE_BOUNDS]
+    )
+    return min(lat_mins), max(lat_maxs), min(lon_mins), max(lon_maxs)
 
 # ---------------------------------------------------------------------------
 # Intensity string → stage mapping
@@ -119,21 +143,17 @@ def _query_year(
     year: int,
     request_source: str,
     phenophase_ids: list[int],
+    state: str = "VT",
 ) -> list[dict]:
-    """Query NPN observations for Vermont for one year.
-
-    Filters by state='VT' and the given phenophase IDs. The API can only
-    filter by full calendar years, so fall-month filtering happens in
-    _parse_records.
+    """Query NPN observations for one state and year.
 
     Returns a list of raw observation dicts, or [] on failure.
     """
-    # Use a list of tuples so the same key can appear multiple times
     params = [
         ("request_src", request_source),
         ("start_date",  f"{year}-01-01"),
         ("end_date",    f"{year}-12-31"),
-        ("state",       "VT"),
+        ("state",       state),
         ("num_days_quality_filter", 30),
     ]
     for pid in phenophase_ids:
@@ -145,7 +165,7 @@ def _query_year(
         data = response.json()
         return data if isinstance(data, list) else []
     except requests.exceptions.RequestException as e:
-        print(f"  [ERROR] Year {year}: {e}")
+        print(f"  [ERROR] {state} {year}: {e}")
         return []
 
 
@@ -178,12 +198,6 @@ def _parse_records(
 
             if not lat or not lon or not date_str:
                 drops["missing_location_or_date"] += 1
-                continue
-
-            # Vermont bounding box backstop
-            if not (VT_LAT_MIN <= lat <= VT_LAT_MAX and
-                    VT_LON_MIN <= lon <= VT_LON_MAX):
-                drops["outside_vermont"] += 1
                 continue
 
             phenophase_status = int(rec.get("phenophase_status", -1))
@@ -272,7 +286,7 @@ def _parse_records(
 def parse_args() -> argparse.Namespace:
     all_years = sorted(set(TRAIN_YEARS + VAL_YEARS + TEST_YEARS))
     p = argparse.ArgumentParser(
-        description="Download USA-NPN fall foliage observations for Vermont."
+        description="Download USA-NPN fall foliage observations."
     )
     p.add_argument(
         "--request-source",
@@ -283,13 +297,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--states", nargs="+", default=["VT"],
+        choices=NORTHEAST_STATES,
+        help=(
+            "States to query (default: VT). "
+            f"Available: {' '.join(NORTHEAST_STATES)}"
+        ),
+    )
+    p.add_argument(
         "--years", nargs="+", type=int, default=all_years,
         help="Years to download (default: all split years).",
     )
     p.add_argument(
-        "--out", type=Path,
-        default=OBSERVER_RAW / "npn_vermont.csv",
-        help="Output CSV path.",
+        "--out", type=Path, default=None,
+        help=(
+            "Output CSV path. Defaults to "
+            "data/raw/observer_reports/npn_{region}.csv "
+            "where region is derived from --states."
+        ),
     )
     return p.parse_args()
 
@@ -305,18 +330,37 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # Derive output path from states if not explicitly provided
+    if args.out is None:
+        if args.states == ["VT"]:
+            region_tag = "vermont"
+        elif set(args.states) == set(NORTHEAST_STATES):
+            region_tag = "northeast"
+        else:
+            region_tag = "_".join(sorted(s.lower() for s in args.states))
+        args.out = OBSERVER_RAW / f"npn_{region_tag}.csv"
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
+
+    region_bounds  = _region_bounds(args.states)
     phenophase_ids = [PHENOPHASE_COLORED_LEAVES, PHENOPHASE_FALLING_LEAVES]
+
+    print(f"[npn] Querying {len(args.states)} state(s): {' '.join(sorted(args.states))}")
+    print(f"[npn] Years: {sorted(args.years)}")
+    print(f"[npn] Region bounds (for reference): lat=[{region_bounds[0]}, {region_bounds[1]}] "
+          f"lon=[{region_bounds[2]}, {region_bounds[3]}]")
 
     all_records: list[dict] = []
 
-    for year in sorted(args.years):
-        print(f"[npn] Querying year {year} ...")
-        raw    = _query_year(year, args.request_source, phenophase_ids)
-        parsed = _parse_records(raw, verbose=True)
-        all_records.extend(parsed)
-        print(f"  → {len(raw)} raw records, {len(parsed)} usable observations")
-        time.sleep(REQUEST_DELAY)
+    for state in sorted(args.states):
+        print(f"\n[npn] State: {state}")
+        for year in sorted(args.years):
+            print(f"  Querying {year} ...")
+            raw    = _query_year(year, args.request_source, phenophase_ids, state)
+            parsed = _parse_records(raw, verbose=True)
+            all_records.extend(parsed)
+            print(f"  → {len(raw)} raw records, {len(parsed)} usable observations")
+            time.sleep(REQUEST_DELAY)
 
     if not all_records:
         print("[npn] No usable records after parsing. Check parameters.")
@@ -324,7 +368,17 @@ def main() -> None:
 
     df = pd.DataFrame(all_records)
 
-    print(f"\n[npn] Total: {len(df)} observations across {df['date'].nunique()} dates")
+    # Deduplicate — same observation may appear if a site is near a state border
+    before = len(df)
+    df = df.drop_duplicates(
+        subset=["date", "latitude", "longitude", "stage"]
+    ).reset_index(drop=True)
+    if len(df) < before:
+        print(f"[npn] Removed {before - len(df)} duplicate records (border sites)")
+
+    print(f"\n[npn] Total: {len(df)} observations across "
+          f"{df['date'].nunique()} dates and "
+          f"{df.groupby(['latitude','longitude']).ngroups} unique sites")
     print("  Stage distribution:")
     for stage, count in df["stage"].value_counts().items():
         print(f"    {stage:20s}: {count:6d}")

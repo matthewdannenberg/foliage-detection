@@ -24,7 +24,6 @@ from download_npn import (
     FALLING_INTENSITY_TO_STAGE,
     PHENOPHASE_COLORED_LEAVES,
     PHENOPHASE_FALLING_LEAVES,
-    VT_LAT_MIN, VT_LAT_MAX, VT_LON_MIN, VT_LON_MAX,
 )
 
 
@@ -188,11 +187,6 @@ class TestParseRecords:
         records = _parse_records([rec], verbose=False)
         assert len(records) == 0
 
-    def test_outside_vermont_dropped(self):
-        rec = _make_record(latitude=35.0, longitude=-84.0)  # Tennessee
-        records = _parse_records([rec], verbose=False)
-        assert len(records) == 0
-
     def test_wrong_month_dropped(self):
         rec = _make_record(observation_date="2019-07-15")  # July
         records = _parse_records([rec], verbose=False)
@@ -225,17 +219,6 @@ class TestParseRecords:
         records = _parse_records([_make_record()], verbose=False)
         assert records[0]["source"] == "USA-NPN"
 
-    def test_vermont_boundary_south(self):
-        # Exactly at southern boundary
-        rec = _make_record(latitude=VT_LAT_MIN, longitude=-72.5)
-        records = _parse_records([rec], verbose=False)
-        assert len(records) == 1
-
-    def test_just_outside_vermont_boundary(self):
-        rec = _make_record(latitude=VT_LAT_MIN - 0.01, longitude=-72.5)
-        records = _parse_records([rec], verbose=False)
-        assert len(records) == 0
-
     def test_colored_no_intensity_dropped(self):
         rec = _make_record(phenophase_status=1, intensity_value=-9999)
         records = _parse_records([rec], verbose=False)
@@ -243,10 +226,10 @@ class TestParseRecords:
 
     def test_multiple_records_mixed(self):
         recs = [
-            _make_record(),                                     # valid peak
-            _make_record(latitude=35.0, longitude=-84.0),      # outside VT
-            _make_record(observation_date="2019-07-01"),        # wrong month
-            _make_record(intensity_value="5-24%"),              # valid early
+            _make_record(),                                       # valid peak
+            _make_record(phenophase_status=-1),                   # uncertain — dropped
+            _make_record(observation_date="2019-07-01"),          # wrong month — dropped
+            _make_record(intensity_value="5-24%"),                # valid early
         ]
         records = _parse_records(recs, verbose=False)
         assert len(records) == 2

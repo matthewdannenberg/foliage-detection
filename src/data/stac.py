@@ -23,12 +23,10 @@ Typical usage:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterator, Optional
 
-import boto3
 import numpy as np
 import rasterio
 from rasterio.env import Env
@@ -92,14 +90,13 @@ BAND_NAME_TO_ASSET = {
 def _s3_env() -> Env:
     """Return a rasterio Env configured for requester-pays S3 access.
 
-    Sets GDAL environment variables so that rasterio can open
-    s3://usgs-landsat COGs directly using the caller's AWS credentials.
-    AWS credentials are read from the standard boto3 credential chain
-    (environment variables, ~/.aws/credentials, IAM role, etc.).
+    AWS credentials are read automatically from the standard boto3 chain
+    (~/.aws/credentials, environment variables, IAM role, etc.) — no
+    explicit credential injection needed.
     """
     return Env(
         AWS_REQUEST_PAYER="requester",
-        AWS_REGION="us-west-2",
+        AWS_REGION=S3_REGION,
         GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
         CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".TIF,.tif",
         GDAL_HTTP_MAX_RETRY="3",
@@ -111,25 +108,22 @@ def _s3_env() -> Env:
 # STAC querying
 # ---------------------------------------------------------------------------
 
-def query_vermont_ard(
+def query_ard(
     year: int,
+    tile_ids: list[tuple[str, str]],
     months: list[int] = [8, 9, 10, 11],
     max_cloud_cover: float = 60.0,
     sensors: list[str] = ["LC08", "LC09"],
 ) -> list:
-    """Query the USGS STAC API for ARD tiles covering Vermont.
-
-    Searches the 'landsat-c2ard-sr' collection for items whose tile ID
-    falls within the Vermont tile grid (h028–h029, v004–v005) acquired
-    during the specified months.
+    """Query the USGS STAC API for ARD tiles covering the given tile IDs.
 
     Args:
         year:             Acquisition year.
+        tile_ids:         List of (h_tile, v_tile) tuples to include,
+                          e.g. [('028', '004'), ('030', '008')].
         months:           List of month numbers to include (default: Aug–Nov).
-        max_cloud_cover:  Maximum cloud cover percentage (0–100). Items above
-                          this threshold are excluded from results.
-        sensors:          Sensor codes to include. Defaults to LC08/LC09 only
-                          for spectral consistency.
+        max_cloud_cover:  Maximum cloud cover percentage (0–100).
+        sensors:          Sensor codes to include (default: LC08/LC09).
 
     Returns:
         List of pystac Item objects, sorted by datetime.
@@ -138,53 +132,62 @@ def query_vermont_ard(
 
     # Build date range covering all requested months in the given year
     date_start = datetime(year, min(months), 1)
-    # End of the last requested month
     last_month = max(months)
     last_day   = 31 if last_month in [1,3,5,7,8,10,12] else 30 if last_month != 2 else 28
     date_end   = datetime(year, last_month, last_day, 23, 59, 59)
-
     datetime_str = f"{date_start.isoformat()}Z/{date_end.isoformat()}Z"
 
-    # Vermont bounding box in WGS84 (STAC queries use geographic coordinates)
-    vermont_bbox = [-73.44, 42.72, -71.46, 45.02]
+    # Use a broad Northeast bbox as the STAC spatial pre-filter (cheap
+    # server-side), then apply exact tile ID filtering client-side below.
+    northeast_bbox = [-80.6, 38.8, -66.8, 47.6]
+
+    target_tile_ids = {f"CU_{h}{v}" for h, v in tile_ids}
 
     print(
         f"[stac] Querying {ARD_COLLECTION} for year={year}, "
-        f"months={months}, max_cloud={max_cloud_cover}%"
+        f"months={months}, max_cloud={max_cloud_cover}%, "
+        f"tiles={len(tile_ids)}"
     )
 
     search = catalog.search(
         collections=[ARD_COLLECTION],
-        bbox=vermont_bbox,
+        bbox=northeast_bbox,
         datetime=datetime_str,
         query={"eo:cloud_cover": {"lte": max_cloud_cover}},
-        max_items=None,   # retrieve all matching items
+        max_items=None,
     )
 
     items = list(search.items())
 
-    # Filter to Vermont tile grid and requested sensors
-    vermont_tile_ids = {
-        f"CU_{h}{v}" for h, v in ARD_VERMONT_TILES
-    }
-
     filtered = []
     for item in items:
-        # Check sensor — item ID starts with sensor code e.g. LC08_CU_028004_...
-        sensor = item.id[:4]
+        sensor    = item.id[:4]
+        tile_part = item.id[5:14]   # e.g. 'CU_028004'
         if sensor not in sensors:
             continue
-
-        # Check tile — item ID contains CU_HHHVVV
-        tile_part = item.id[5:14]   # e.g. 'CU_028004'
-        if tile_part not in vermont_tile_ids:
+        if tile_part not in target_tile_ids:
             continue
-
         filtered.append(item)
 
     filtered.sort(key=lambda i: i.datetime)
     print(f"[stac] Found {len(filtered)} items after sensor/tile filtering.")
     return filtered
+
+
+def query_vermont_ard(
+    year: int,
+    months: list[int] = [8, 9, 10, 11],
+    max_cloud_cover: float = 60.0,
+    sensors: list[str] = ["LC08", "LC09"],
+) -> list:
+    """Backward-compatible wrapper — queries Vermont tiles only."""
+    return query_ard(
+        year=year,
+        tile_ids=ARD_VERMONT_TILES,
+        months=months,
+        max_cloud_cover=max_cloud_cover,
+        sensors=sensors,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -228,21 +231,41 @@ class ARDItem:
         self.v_tile = grid_part[3:]
 
     def _asset_url(self, asset_key: str) -> str:
-        """Return the S3 URL for a given asset key."""
+        """Return the S3 URL for a given asset key.
+
+        The STAC API may return HTTPS URLs (https://landsatlook.usgs.gov/...)
+        instead of S3 URLs (s3://usgs-landsat/...). We prefer S3 for direct
+        requester-pays access, so check for an 's3' alternate link first,
+        then fall back to converting the HTTPS URL to S3 format.
+        """
         asset = self.item.assets.get(asset_key)
         if asset is None:
             raise KeyError(
                 f"Asset '{asset_key}' not found in item {self.tile_id}. "
                 f"Available: {list(self.item.assets.keys())}"
             )
-        try:
-            return asset.extra_fields['alternate']['s3']['href']
-        except KeyError:
-            raise KeyError(
-                f"No S3 alternate href found for asset '{asset_key}' "
-                f"in item {self.tile_id}. Available extra_fields: "
-                f"{asset.extra_fields}"
-        )
+
+        # Check for an explicit S3 alternate href
+        extra = getattr(asset, "extra_fields", {}) or {}
+        alternate = extra.get("alternate", {})
+        if "s3" in alternate:
+            return alternate["s3"].get("href", asset.href)
+
+        href = asset.href
+
+        # Convert HTTPS landsatlook URL to S3 equivalent
+        # https://landsatlook.usgs.gov/data/collection02/...
+        # → s3://usgs-landsat/collection02/...
+        if href.startswith("https://landsatlook.usgs.gov/data/"):
+            return "s3://usgs-landsat/" + href[len("https://landsatlook.usgs.gov/data/"):]
+
+        # Also handle /tile/ paths used by ARD
+        # https://landsatlook.usgs.gov/tile/collection02/...
+        # → s3://usgs-landsat/collection02/...
+        if href.startswith("https://landsatlook.usgs.gov/tile/"):
+            return "s3://usgs-landsat/" + href[len("https://landsatlook.usgs.gov/tile/"):]
+
+        return href
 
     def _read_band_from_s3(
         self, asset_key: str, env: Env
@@ -317,8 +340,9 @@ class ARDItem:
     def stack(self, env: Optional[Env] = None) -> tuple[np.ndarray, object]:
         """Stream, process, and return the 9-channel spectral stack at 250m.
 
-        All S3 reads share a single rasterio Env to minimise credential
-        refresh calls. No data is written to disk.
+        ARD tiles are already in TARGET_CRS (EPSG:5070), so only downsampling
+        to 250m is needed — no reprojection. All S3 reads share a single
+        rasterio Env to minimise credential refresh calls.
 
         Returns:
             data:      (9, H', W') float32 at TARGET_CRS / TARGET_RESOLUTION

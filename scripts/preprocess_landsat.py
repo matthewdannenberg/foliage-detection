@@ -2,12 +2,13 @@
 preprocess_landsat.py — Stream Landsat ARD from S3 and write processed stacks.
 
 For each year in the training/val/test range:
-  1. Query the USGS LandsatLook STAC API for ARD tiles covering Vermont
+  1. Query the USGS LandsatLook STAC API for ARD tiles covering the requested
+     tile set (default: Vermont; pass --tile-list for Northeast or any subset)
      in the Aug–Nov window with cloud cover below threshold.
   2. For each item, stream only the QA band first to check cloud coverage.
      Items below ARD_MIN_VALID_FRACTION are skipped without reading spectral data.
   3. Stream the 6 spectral bands directly from S3 COGs, compute indices,
-     and reproject to 250m UTM-18N — entirely in memory.
+     and reproject to 250m — entirely in memory.
   4. Write the processed 9-channel stack as a compressed GeoTIFF to
      data/processed/landsat/{year}/{tile_id}_stack.tif.
 
@@ -17,6 +18,11 @@ AWS credentials are read from the standard boto3 credential chain.
 The S3 bucket (s3://usgs-landsat) is requester-pays — charges apply to
 your AWS account for data transfer.
 
+The --tile-list argument accepts a text file with one tile ID per line
+(format: HHHVVV e.g. 028004), as produced by process_observations.py.
+This allows targeted downloads covering only tiles with known observation
+sites, minimising S3 transfer costs.
+
 Output layout:
     data/processed/landsat/
         {year}/
@@ -24,6 +30,7 @@ Output layout:
 
 Usage:
     python scripts/preprocess_landsat.py
+    python scripts/preprocess_landsat.py --tile-list data/processed/observations/ard_tile_list.txt
     python scripts/preprocess_landsat.py --years 2019 2020
     python scripts/preprocess_landsat.py --years 2019 --max-cloud 50 --overwrite
 """
@@ -40,6 +47,7 @@ from tqdm import tqdm
 
 from config import (
     ARD_MIN_VALID_FRACTION,
+    ARD_VERMONT_TILES,
     DATA_PROCESSED,
     LANDSAT_CHANNEL_NAMES,
     NODATA_VALUE,
@@ -48,7 +56,7 @@ from config import (
     VAL_YEARS,
     TEST_YEARS,
 )
-from data.stac import ARDItem, _s3_env, query_vermont_ard
+from data.stac import ARDItem, _s3_env, query_ard
 
 PROCESSED_LANDSAT = DATA_PROCESSED / "landsat"
 
@@ -128,6 +136,14 @@ def parse_args() -> argparse.Namespace:
         description="Stream Landsat ARD from S3 and write processed stacks."
     )
     p.add_argument(
+        "--tile-list", type=Path, default=None,
+        help=(
+            "Text file with one ARD tile ID per line (format: HHHVVV, "
+            "e.g. 028004), as produced by process_observations.py. "
+            "Defaults to Vermont tiles only if not provided."
+        ),
+    )
+    p.add_argument(
         "--years", nargs="+", type=int, default=all_years,
         help="Years to process (default: all split years).",
     )
@@ -145,11 +161,44 @@ def parse_args() -> argparse.Namespace:
     )
     return p.parse_args()
 
+
+def _load_tile_ids(tile_list_path: Path | None) -> list[tuple[str, str]]:
+    """Load tile IDs from a text file, or fall back to Vermont defaults.
+
+    File format: one tile ID per line, e.g. '028004' (HHHVVV).
+    Returns a list of (h_tile, v_tile) tuples.
+    """
+    if tile_list_path is None:
+        print(f"[preprocess] No --tile-list provided, using Vermont tiles: "
+              f"{ARD_VERMONT_TILES}")
+        return list(ARD_VERMONT_TILES)
+
+    if not tile_list_path.exists():
+        print(f"[preprocess] ERROR: tile list not found: {tile_list_path}")
+        sys.exit(1)
+
+    tile_ids = []
+    for line in tile_list_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) != 6 or not line.isdigit():
+            print(f"[preprocess] WARNING: skipping malformed tile ID '{line}' "
+                  f"(expected 6-digit HHHVVV)")
+            continue
+        tile_ids.append((line[:3], line[3:]))
+
+    print(f"[preprocess] Loaded {len(tile_ids)} tile IDs from {tile_list_path}")
+    return tile_ids
+
+
 def main() -> None:
     args = parse_args()
+    tile_ids = _load_tile_ids(args.tile_list)
 
     print(
         f"[preprocess] Processing years: {args.years}\n"
+        f"             Tiles: {len(tile_ids)}\n"
         f"             Months: {args.months}\n"
         f"             Max cloud cover: {args.max_cloud}%%\n"
         f"             Output: {PROCESSED_LANDSAT}\n"
@@ -161,15 +210,17 @@ def main() -> None:
 
     for year in args.years:
         try:
-            items = query_vermont_ard(
+            items = query_ard(
                 year=year,
+                tile_ids=tile_ids,
                 months=args.months,
                 max_cloud_cover=args.max_cloud,
             )
         except Exception:
             print(f"\n[ERROR] STAC query failed for year {year}:")
             traceback.print_exc()
-            year_fail += year
+            n_fail += 1
+            failed_years += year
             continue
 
         if not items:

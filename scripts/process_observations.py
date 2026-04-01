@@ -42,6 +42,7 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
+from pyproj import Transformer
 
 from config import (
     CONSOLIDATION_COORD_DECIMALS,
@@ -51,7 +52,16 @@ from config import (
     STAGES,
     STAGE_NAMES,
     NUM_CLASSES,
+    TARGET_CRS,
 )
+
+# ---------------------------------------------------------------------------
+# ARD tile grid constants (duplicated from diagnose_ard_tiles.py to keep
+# process_observations.py self-contained)
+# ---------------------------------------------------------------------------
+ARD_TILE_SIZE_M  = 150_000
+ARD_GRID_ORIGIN_X = -2_565_000
+ARD_GRID_ORIGIN_Y =  3_314_805
 
 # ---------------------------------------------------------------------------
 # Confidence heuristics
@@ -303,6 +313,23 @@ def consolidate(df: pd.DataFrame) -> pd.DataFrame:
 # Main
 # ---------------------------------------------------------------------------
 
+def _observations_to_tile_list(df: pd.DataFrame) -> list[str]:
+    """Derive the set of ARD tile IDs needed to cover all observation sites.
+
+    Returns a sorted list of tile ID strings e.g. ['028004', '029005', ...].
+    """
+    transformer = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+    tile_ids: set[str] = set()
+
+    for _, row in df.drop_duplicates(subset=["latitude", "longitude"]).iterrows():
+        x, y = transformer.transform(float(row["longitude"]), float(row["latitude"]))
+        h = int((x - ARD_GRID_ORIGIN_X) / ARD_TILE_SIZE_M) + 1
+        v = int((ARD_GRID_ORIGIN_Y - y) / ARD_TILE_SIZE_M) + 1
+        tile_ids.add(f"{h:03d}{v:03d}")
+
+    return sorted(tile_ids)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Consolidate raw observer CSVs into standardised observations."
@@ -318,6 +345,19 @@ def parse_args() -> argparse.Namespace:
         "--out", type=Path,
         default=OBSERVATIONS_DIR / "observations.csv",
         help="Output path for the standardised CSV.",
+    )
+    p.add_argument(
+        "--tile-list", type=Path,
+        default=None,
+        help=(
+            "If provided, write a text file of ARD tile IDs needed to cover "
+            "all observation sites. Defaults to "
+            "data/processed/observations/ard_tile_list.txt."
+        ),
+    )
+    p.add_argument(
+        "--no-tile-list", action="store_true",
+        help="Skip tile list generation.",
     )
     p.add_argument(
         "--no-consolidate", action="store_true",
@@ -387,6 +427,13 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_csv(args.out, index=False)
     print(f"\n[process] Saved → {args.out}  ({len(out_df)} observations)")
+
+    # --- Tile list ---
+    if not args.no_tile_list:
+        tile_list_path = args.tile_list or (args.out.parent / "ard_tile_list.txt")
+        tile_ids = _observations_to_tile_list(out_df)
+        tile_list_path.write_text("\n".join(tile_ids) + "\n")
+        print(f"[process] ARD tile list ({len(tile_ids)} tiles) → {tile_list_path}")
 
 
 if __name__ == "__main__":
