@@ -2,7 +2,7 @@ Data Downloading and Initial Processing Instructions
 
 1)  NLCD Land Cover (CONUS) Data
         Can be downloaded directly from https://www.mrlc.gov/data
-            -   most recently downloaded so on 3/13/2026
+            -   most recently downloaded on 3/13/2026
         Downloaded data should be placed in data/raw/nlcd/
         To shrink file size, data clipped down to a bounding box surrounding the northeast US by clip_nlcd.py
 
@@ -10,17 +10,13 @@ Data Downloading and Initial Processing Instructions
         python scripts/clip_nlcd.py --all --input-dir "your/path/to/downloaded/nlcd/files"
 
 2)  USGS National Elevation Dataset (NED)
-        Can be downloaded directly from https://apps.nationalmap.gov/
-            -   most recently downloaded on 3/28/2026
-        Downloaded data should be placed in data/raw/ned/
-        USGS 1/3 Arc Second Product chosen, tiles covering a small radius around Vermont
-                        n43w073,    n43w074
-            n44w072,    n44w073,    n44w074
-            n45w072,    n45w073,    n45w074
-            n46w072,    n46w073,    n46w074
+        Downloaded programmatically to data/raw/ned/
+            -   most recently downloaded on 4/3/2026
+        USGS 1 Arc Second Product chosen, tiles covering the northeast US.
         For convenience of access, files are then merged into a larger mosaic by prepare_dem.py
     
-    ** From root project directory, run command
+    ** From root project directory, run commands
+        python scripts/download_ned.py
         python scripts/prepare_dem.py
 
 3)  USA National Phenology Network Data
@@ -42,7 +38,7 @@ Data Downloading and Initial Processing Instructions
 
 4)  Landsat ARD Data
         Programmatically found, preprocessed, and downloaded by preprocess_landsat.py
-            -   most recently downloaded on 3/27/2026
+            -   most recently downloaded on 4/2/2026
         Data located using STAC queries, then preprocessed and downloaded from the usgs-landsat AWS S3 bucket (requester pays). Setting up local AWS authentication in advance is required.
         By default, data limited to 
             tiles in the northeast containing observations, 
@@ -51,6 +47,8 @@ Data Downloading and Initial Processing Instructions
         
     ** From root project directory, run command
         python scripts/preprocess_landsat.py --tile-list data/processed/observations/ard_tile_list.txt
+    
+        It is highly recommended to run this command in an AWS EC2 instance in us-west so as to be colocated with the usgs-landsat AWS S3 bucket.
 
 
 

@@ -30,6 +30,7 @@ Output:
     data/processed/norm_stats.json   (per-channel mean/std, training years only)
 
 Usage:
+    python scripts/build_patches.py 
     python scripts/build_patches.py --dem path/to/dem.tif
     python scripts/build_patches.py --dem path/to/dem.tif --max-synthetic 3000
     python scripts/build_patches.py --dem path/to/dem.tif --no-synthetic
@@ -57,6 +58,7 @@ from tqdm import tqdm
 from config import (
     ALL_CHANNEL_NAMES,
     CONSOLIDATION_COORD_DECIMALS,
+    DATA_RAW,
     DATA_PROCESSED,
     NORM_STATS_PATH,
     NUM_CHANNELS,
@@ -82,6 +84,7 @@ from data.nlcd import NLCDLayer
 from process_observations import consolidate
 
 PROCESSED_LANDSAT = DATA_PROCESSED / "landsat"
+DEM_PATH = DATA_RAW / "ned"
 
 
 # ---------------------------------------------------------------------------
@@ -641,7 +644,7 @@ def parse_args() -> argparse.Namespace:
         description="Build HDF5 patch archive from processed Landsat stacks."
     )
     p.add_argument(
-        "--dem", type=Path, required=True,
+        "--dem", type=Path, default=DEM_PATH,
         help="Path to the source DEM GeoTIFF (any CRS; will be reprojected).",
     )
     p.add_argument(
