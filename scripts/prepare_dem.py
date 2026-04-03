@@ -1,18 +1,20 @@
 """
-prepare_dem.py — Merge USGS NED tiles into a single Vermont DEM GeoTIFF.
+prepare_dem.py — Merge USGS NED tiles into a single Northeast DEM GeoTIFF.
 
-Downloads from the USGS National Map come as individual tiles (typically
-1x1 degree). This script merges all tiles in a source directory into one
-continuous raster covering Vermont, saved as a compressed GeoTIFF.
+Downloads from the USGS National Map come as individual 1x1 degree tiles.
+This script merges all tiles in a source directory into one continuous
+raster covering the Northeast, saved as a compressed GeoTIFF.
 
-The output CRS and resolution are preserved from the source tiles (typically
-WGS84, ~10m for 1/3 arc-second NED). build_patches.py reprojects the DEM
-on the fly to match each Landsat tile's grid, so no reprojection is needed
-here.
+1 arc-second (~30m) tiles are used — appropriate since all elevation data
+is resampled to 250m during patch extraction in build_patches.py.
+
+The output CRS and resolution are preserved from the source tiles (WGS84,
+~30m for 1 arc-second NED). build_patches.py reprojects the DEM on the
+fly to match each Landsat tile's grid, so no reprojection is needed here.
 
 Usage:
     python scripts/prepare_dem.py
-    python scripts/prepare_dem.py --input-dir data/raw/ned --out data/raw/ned/vermont_dem.tif
+    python scripts/prepare_dem.py --input-dir data/raw/ned --out data/raw/ned/northeast_dem.tif
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from rasterio.merge import merge
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Merge NED tiles into a single Vermont DEM GeoTIFF."
+        description="Merge NED 1 arc-second tiles into a single Northeast DEM GeoTIFF."
     )
     p.add_argument(
         "--input-dir", type=Path,
@@ -36,8 +38,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--out", type=Path,
-        default=Path("data/raw/ned/vermont_dem.tif"),
-        help="Output path for merged DEM (default: data/raw/ned/vermont_dem.tif).",
+        default=Path("data/raw/ned/northeast_dem.tif"),
+        help="Output path for merged DEM (default: data/raw/ned/northeast_dem.tif).",
     )
     p.add_argument(
         "--pattern", type=str, default="*.tif",
