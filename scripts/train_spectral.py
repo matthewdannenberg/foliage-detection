@@ -11,6 +11,9 @@ import argparse
 import sys
 from pathlib import Path
 
+# Make the src package importable when running from project root
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from config import PATCHES_DIR, TRAIN
 from data.dataset import make_dataloaders
 from models.spectral_cnn import build_model
@@ -35,6 +38,8 @@ def parse_args():
                    help="Optional TensorBoard run name.")
     p.add_argument("--resume",     type=Path,  default=None,
                    help="Path to a checkpoint to resume from.")
+    p.add_argument("--confidence-weighting", action="store_true",
+                   help="Weight training samples by class balance × confidence score.")
     return p.parse_args()
 
 
@@ -58,6 +63,7 @@ def main():
         hdf5_path=args.hdf5,
         batch_size=cfg["batch_size"],
         num_workers=cfg["num_workers"],
+        use_confidence_weighting=args.confidence_weighting,
     )
 
     model = build_model()

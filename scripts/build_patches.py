@@ -84,7 +84,7 @@ from data.nlcd import NLCDLayer
 from process_observations import consolidate
 
 PROCESSED_LANDSAT = DATA_PROCESSED / "landsat"
-DEM_PATH = DATA_RAW / "ned"
+DEM_PATH = DATA_RAW / "ned" / "northeast_dem.tif"
 
 
 # ---------------------------------------------------------------------------
