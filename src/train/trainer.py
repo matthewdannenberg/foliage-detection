@@ -135,14 +135,19 @@ class Trainer:
         print(f"[trainer] Using device: {self.device}")
         self.model.to(self.device)
 
-        # Class weights
-        if class_weights is None:
-            train_ds = loaders["train"].dataset
-            class_weights = train_ds.class_weights()
-        self.class_weights = class_weights.to(self.device)
-
-        # Loss, optimiser, scheduler
-        self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+        # Class weights — used only if use_weighted_loss=True in cfg.
+        # When using WeightedRandomSampler, weighted loss double-counts the
+        # imbalance correction and destabilizes training. Default is unweighted.
+        if cfg.get("use_weighted_loss", False):
+            if class_weights is None:
+                train_ds = loaders["train"].dataset
+                class_weights = train_ds.class_weights()
+            self.class_weights = class_weights.to(self.device)
+            self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+        else:
+            self.criterion = nn.CrossEntropyLoss(
+                label_smoothing=cfg.get("label_smoothing", 0.1)
+            )
         self.optimiser = AdamW(
             self.model.parameters(),
             lr=cfg["learning_rate"],
@@ -233,6 +238,14 @@ class Trainer:
         if self.writer:
             self.writer.close()
 
+        # Report final validation performance using the best checkpoint
+        print("\n[trainer] Loading best checkpoint for final validation report ...")
+        best_path = self.checkpoint_dir / "best.pt"
+        if best_path.exists():
+            self.model = SpectralCNN.load(best_path, map_location=str(self.device))
+            self.model.to(self.device)
+        self.evaluate(split="val")
+
         return self.history
 
     def _train_epoch(self, epoch: int) -> dict[str, float]:
@@ -290,11 +303,61 @@ class Trainer:
         metrics["loss"] = total_loss / n
         return metrics
 
-    def evaluate_test(self) -> dict[str, float]:
-        """Run evaluation on the test split and print a detailed report."""
-        metrics = self._eval_epoch("test", epoch=0)
-        print("\n[trainer] Test set results:")
+    def evaluate(self, split: str = "val") -> dict[str, float]:
+        """Run evaluation on the given split and print a detailed report
+        including per-class accuracy and a full confusion matrix.
+
+        Args:
+            split: One of 'val' or 'test'. During development, always use
+                   'val'. Use 'test' only once, via evaluate.py, when all
+                   development decisions are final.
+        """
+        self.model.eval()
+        total_loss = 0.0
+        all_preds, all_labels = [], []
+
+        with torch.no_grad():
+            for patches, labels in self.loaders[split]:
+                patches = patches.to(self.device)
+                labels  = labels.to(self.device)
+                logits  = self.model(patches)
+                loss    = self.criterion(logits, labels)
+                total_loss += loss.item() * len(labels)
+                all_preds.append(logits.argmax(dim=1).cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
+
+        n      = len(self.loaders[split].dataset)
+        preds  = np.concatenate(all_preds)
+        labels = np.concatenate(all_labels)
+
+        metrics = per_class_accuracy(preds, labels)
+        metrics["loss"] = total_loss / n
+
+        print(f"\n[trainer] {split} set results:")
         for k, v in metrics.items():
             if not np.isnan(v):
                 print(f"  {k:20s}: {v:.4f}")
+
+        # Confusion matrix — rows = true class, columns = predicted class
+        cm = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=int)
+        for t, p in zip(labels, preds):
+            cm[t, p] += 1
+
+        col_w = 14
+        print(f"\n[trainer] Confusion matrix (rows=true, cols=predicted):")
+        header = f"  {'':20s}" + "".join(
+            f"{STAGE_NAMES[j]:>{col_w}}" for j in range(NUM_CLASSES)
+        )
+        print(header)
+        print("  " + "-" * (20 + col_w * NUM_CLASSES))
+        for i in range(NUM_CLASSES):
+            row_total = cm[i].sum()
+            row = f"  {STAGE_NAMES[i]:20s}"
+            for j in range(NUM_CLASSES):
+                count = cm[i, j]
+                pct   = 100 * count / row_total if row_total > 0 else 0
+                cell  = f"{count}({pct:.0f}%)"
+                row  += f"{cell:>{col_w}}"
+            print(row)
+
         return metrics

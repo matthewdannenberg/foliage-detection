@@ -1,3 +1,4 @@
 src/__pycache__/*
 src/data/__pycache__/*
 src/foliage*
+runs/*

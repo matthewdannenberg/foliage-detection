@@ -83,9 +83,12 @@ def main():
     )
 
     history = trainer.fit()
-    trainer.evaluate_test()
 
-    print("\n[train] Done. Best checkpoint: checkpoints/best.pt")
+    print(
+        "\n[train] Done."
+        "\n  Best checkpoint : checkpoints/best.pt"
+        "\n  To evaluate on the test set run: python scripts/evaluate.py"
+    )
 
 
 if __name__ == "__main__":

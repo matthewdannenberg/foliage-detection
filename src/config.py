@@ -180,10 +180,12 @@ MODEL = {
 TRAIN = {
     "batch_size":        64,
     "num_workers":       4,
-    "learning_rate":     1e-3,
+    "learning_rate":     3e-4,      
     "weight_decay":      1e-4,
-    "epochs":            50,
-    "patience":          8,          # early stopping patience (val loss)
+    "epochs":            150,
+    "patience":          25,        
+    "label_smoothing":   0.1,       # prevents overconfident predictions on minority classes
+    "use_weighted_loss": False,     # sampler already handles imbalance — don't double-count
     "checkpoint_dir":    PROJECT_ROOT / "checkpoints",
     "log_dir":           PROJECT_ROOT / "runs",
 }
