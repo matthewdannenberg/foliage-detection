@@ -204,6 +204,22 @@ def _lonlat_to_rowcol(
     return row, col
 
 
+def _rowcol_to_lonlat(
+    row: int,
+    col: int,
+    transform,
+) -> tuple[float, float]:
+    """Convert pixel (row, col) on the 250m grid to WGS84 (lon, lat).
+
+    Inverse of _lonlat_to_rowcol. Returns the centre of the pixel.
+    """
+    x = transform.c + (col + 0.5) * transform.a
+    y = transform.f + (row + 0.5) * transform.e
+    transformer = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True)
+    lon, lat = transformer.transform(x, y)
+    return lon, lat
+
+
 # ---------------------------------------------------------------------------
 # Tile index
 # ---------------------------------------------------------------------------
@@ -374,6 +390,7 @@ def extract_observer_patches(
                 continue
 
             patch = _fill_nan(_extract_patch(cube, px_row, px_col, half))
+            patch_lon, patch_lat = _rowcol_to_lonlat(px_row, px_col, transform)
             records.append({
                 "patch":        patch,
                 "stage":        stage,
@@ -381,6 +398,8 @@ def extract_observer_patches(
                 "year":         year,
                 "source":       source,
                 "label_source": "observer",
+                "latitude":     patch_lat,
+                "longitude":    patch_lon,
             })
 
     print(f"  Tiles with nearby observations: {tiles_with_obs}")
@@ -523,6 +542,7 @@ def generate_synthetic_patches(
                     continue
 
                 patch = _extract_patch(cube, r, c, half)
+                patch_lon, patch_lat = _rowcol_to_lonlat(r, c, transform)
                 records_by_stage[stage_idx].append({
                     "patch":        patch,
                     "stage":        stage_idx,
@@ -530,6 +550,8 @@ def generate_synthetic_patches(
                     "year":         year,
                     "source":       "synthetic",
                     "label_source": f"synthetic_{stage_name}",
+                    "latitude":     patch_lat,
+                    "longitude":    patch_lon,
                 })
                 n_collected += 1
                 tile_count  += 1
@@ -551,6 +573,8 @@ def write_hdf5(records: list[dict], out_path: Path) -> None:
         /labels       (N,)         int64
         /confidence   (N,)         float32
         /years        (N,)         int32
+        /latitudes    (N,)         float32  (NaN for synthetic patches)
+        /longitudes   (N,)         float32  (NaN for synthetic patches)
         /label_source (N,)         variable-length string
         /metadata     JSON string
     """
@@ -561,6 +585,8 @@ def write_hdf5(records: list[dict], out_path: Path) -> None:
     labels       = np.array([r["stage"]      for r in records], dtype=np.int64)
     confidence   = np.array([r["confidence"] for r in records], dtype=np.float32)
     years        = np.array([r["year"]       for r in records], dtype=np.int32)
+    latitudes    = np.array([r["latitude"]   for r in records], dtype=np.float32)
+    longitudes   = np.array([r["longitude"]  for r in records], dtype=np.float32)
     label_source = [r["label_source"]        for r in records]
 
     metadata = json.dumps({
@@ -580,6 +606,8 @@ def write_hdf5(records: list[dict], out_path: Path) -> None:
         f.create_dataset("labels",     data=labels)
         f.create_dataset("confidence", data=confidence)
         f.create_dataset("years",      data=years)
+        f.create_dataset("latitudes",  data=latitudes)
+        f.create_dataset("longitudes", data=longitudes)
 
         # Variable-length strings for label_source
         dt = h5py.special_dtype(vlen=str)
