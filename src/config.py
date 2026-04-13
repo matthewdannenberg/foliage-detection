@@ -183,7 +183,7 @@ TRAIN = {
     "learning_rate":     3e-4,      
     "weight_decay":      1e-4,
     "epochs":            150,
-    "patience":          25,        
+    "patience":          20,        
     "label_smoothing":   0.1,       # prevents overconfident predictions on minority classes
     "use_weighted_loss": False,     # sampler already handles imbalance — don't double-count
     "checkpoint_dir":    PROJECT_ROOT / "checkpoints",
@@ -248,6 +248,22 @@ SYNTHETIC_LATE_CONFIDENCE          = 0.80   # Nov 10–30: high confidence, some
 SYNTHETIC_NO_TRANSITION_WINDOW = ((8, 1),  (8, 20))
 # November 10–30: well past peak, significant leaf drop → late
 SYNTHETIC_LATE_WINDOW          = ((11, 10), (11, 30))
+
+# Minimum fraction of the patch (C, H, W) that must be deciduous or mixed
+# forest in the NLCD layer. The centre-pixel NLCD check catches sites in
+# non-forest land cover, but at 250m resolution a centre pixel can pass
+# while the surrounding patch is dominated by urban or agricultural land
+# (e.g. an isolated park in a dense city). A patch-level threshold catches
+# these cases. 0.25 = at least 1/4 of the 32x32 patch must be forest.
+PATCH_MIN_DECIDUOUS_FRACTION = 0.25
+
+# Maximum number of patches that any single NPN site (identified by snapped
+# lat/lon) may contribute across all years and stages. Without a cap, a
+# single persistently-monitored site in an atypical location can dominate
+# training data with near-identical patches. 20 patches per site allows
+# meaningful temporal variation while preventing any single site from
+# contributing more than ~1% of a 2000-patch dataset.
+MAX_PATCHES_PER_SITE = 50
 
 # Random seed for reproducible synthetic patch sampling
 RANDOM_SEED = 42

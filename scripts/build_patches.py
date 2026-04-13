@@ -60,10 +60,12 @@ from config import (
     CONSOLIDATION_COORD_DECIMALS,
     DATA_RAW,
     DATA_PROCESSED,
+    MAX_PATCHES_PER_SITE,
     NORM_STATS_PATH,
     NUM_CHANNELS,
     NUM_CLASSES,
     OBSERVATIONS_DIR,
+    PATCH_MIN_DECIDUOUS_FRACTION,
     PATCH_SIZE,
     PATCHES_DIR,
     RANDOM_SEED,
@@ -277,9 +279,11 @@ def extract_observer_patches(
       2. Re-consolidate by snapped location (plurality vote within window).
       3. Extract one patch per consolidated location.
 
-    This approach ensures that multiple observations near the same site
-    across several days are combined into a single high-quality patch
-    rather than producing duplicate noisy patches.
+    Filters applied per patch:
+      - Centre pixel must pass NLCD exclusion mask
+      - Centre pixel spectral channels must not be NaN
+      - Patch-level deciduous fraction >= PATCH_MIN_DECIDUOUS_FRACTION
+      - Each site (snapped lat/lon) capped at MAX_PATCHES_PER_SITE total
 
     Returns a list of record dicts with keys:
         patch, stage, confidence, year, source, label_source
@@ -288,6 +292,10 @@ def extract_observer_patches(
     half = PATCH_SIZE // 2
     skipped = Counter()
     tiles_with_obs = 0
+
+    # Track patches per site to enforce MAX_PATCHES_PER_SITE cap
+    # Key: (lat_snapped, lon_snapped) tuple
+    site_patch_counts: Counter = Counter()
 
     # Collect all unique tile paths sorted by date for clean progress display
     all_tile_paths = sorted(
@@ -388,6 +396,30 @@ def extract_observer_patches(
             if np.isnan(centre_spectral).any():
                 skipped["centre_nan"] += 1
                 continue
+
+            # Patch-level deciduous fraction check. The centre-pixel NLCD
+            # filter passes sites like isolated urban parks where the
+            # surrounding patch is dominated by impervious surfaces. Require
+            # that at least PATCH_MIN_DECIDUOUS_FRACTION of the patch is
+            # classified as deciduous or mixed forest.
+            decid_patch = deciduous_fraction[
+                px_row - half: px_row + half,
+                px_col - half: px_col + half,
+            ]
+            if decid_patch.mean() < PATCH_MIN_DECIDUOUS_FRACTION:
+                skipped["low_deciduous_fraction"] += 1
+                continue
+
+            # Per-site cap — prevent any single NPN monitoring site from
+            # contributing more than MAX_PATCHES_PER_SITE patches total.
+            site_key = (
+                round(float(obs_row["latitude"]),  CONSOLIDATION_COORD_DECIMALS),
+                round(float(obs_row["longitude"]), CONSOLIDATION_COORD_DECIMALS),
+            )
+            if site_patch_counts[site_key] >= MAX_PATCHES_PER_SITE:
+                skipped["site_cap_exceeded"] += 1
+                continue
+            site_patch_counts[site_key] += 1
 
             patch = _fill_nan(_extract_patch(cube, px_row, px_col, half))
             patch_lon, patch_lat = _rowcol_to_lonlat(px_row, px_col, transform)
