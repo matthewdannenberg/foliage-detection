@@ -283,7 +283,8 @@ def extract_observer_patches(
       - Centre pixel must pass NLCD exclusion mask
       - Centre pixel spectral channels must not be NaN
       - Patch-level deciduous fraction >= PATCH_MIN_DECIDUOUS_FRACTION
-      - Each site (snapped lat/lon) capped at MAX_PATCHES_PER_SITE total
+      - Each USA-NPN site (snapped lat/lon) capped at MAX_PATCHES_PER_SITE total
+      - PhenoCam sites are uncapped — temporal diversity within a site is the value
 
     Returns a list of record dicts with keys:
         patch, stage, confidence, year, source, label_source
@@ -412,11 +413,15 @@ def extract_observer_patches(
 
             # Per-site cap — prevent any single NPN monitoring site from
             # contributing more than MAX_PATCHES_PER_SITE patches total.
+            # PhenoCam sites are exempt: each day represents a genuinely
+            # different spectral state along the seasonal trajectory, so
+            # temporal diversity within a site is the point, not a problem.
             site_key = (
                 round(float(obs_row["latitude"]),  CONSOLIDATION_COORD_DECIMALS),
                 round(float(obs_row["longitude"]), CONSOLIDATION_COORD_DECIMALS),
+                source,
             )
-            if site_patch_counts[site_key] >= MAX_PATCHES_PER_SITE:
+            if source == "USA-NPN" and site_patch_counts[site_key] >= MAX_PATCHES_PER_SITE:
                 skipped["site_cap_exceeded"] += 1
                 continue
             site_patch_counts[site_key] += 1
