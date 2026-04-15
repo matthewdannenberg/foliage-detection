@@ -19,16 +19,28 @@ Data Downloading and Initial Processing Instructions
         python scripts/download_ned.py
         python scripts/prepare_dem.py
 
-3)  USA National Phenology Network Data
-        Programmatically found, preprocessed, and downloaded by download_npn.py
-            -   most recently downloaded on 4/1/2026
-        Individual observations saved in data/raw/observer_reports as npn_vermont.csv
-        Based on specific phenology observed (colored leaves/falling leaves) each observation is labeled as pre-transition/early/peak/late
+3)  Observational Data
+    A)  USA National Phenology Network Data
+            Programmatically found, preprocessed, and downloaded by download_npn.py
+                -   most recently downloaded on 4/1/2026
+            Individual observations saved in data/raw/observer_reports as npn_vermont.csv
+            Based on specific phenology observed (colored leaves/falling leaves) each observation is labeled as pre-transition/early/peak/late
 
     ** From root project directory, run command
         python scripts/download_npn.py --request-source "Your Name" --states ME NH VT MA RI CT NY NJ PA
+
+    B)  PhenoCam Network Data
+            Programmatically found, preprocessed, and downloaded by download_phenocam.py
+                -   most recently downloaded on 4/15/2026
+            Individual observations saved in data/raw/observer_reports as phenocam_northeast.csv
+            Raw data consists of time series measuring the amount of green and red in view of fixed cameras per day
+            PELT algorithm used for time series segmentation, followed by assignment of stage labels to each segment
     
-        After downloading, observations at the same date/time are consolidated into pooled observations. 
+    ** From root project directory, run command
+        python scripts/download_phenocam.py --verbose
+
+    Pooling Observational Data  
+        After downloading, observations at the same date/time/location are consolidated into pooled observations. 
         These are saved in data/processed/observer_reports as observations.csv
         Further, ARD tiles which contain observations are determined.
         These are saved in data/processed/observer_reports as ard_tile_list.txt
@@ -41,7 +53,7 @@ Data Downloading and Initial Processing Instructions
             -   most recently downloaded on 4/2/2026
         Data located using STAC queries, then preprocessed and downloaded from the usgs-landsat AWS S3 bucket (requester pays). Setting up local AWS authentication in advance is required.
         By default, data limited to 
-            tiles in the northeast containing observations, 
+            tiles in the northeast containing observations (ard_tile_list.txt is required for this purpose), 
             August, September, October, November,
             less than 60% cloud cover.
         
