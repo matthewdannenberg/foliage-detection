@@ -96,7 +96,7 @@ NLCD_DECIDUOUS_HIGH  = 41   # Deciduous Forest (>80% deciduous)
 NLCD_MIXED_FOREST    = 43   # Mixed Forest     (20–80% deciduous)
 NLCD_EVERGREEN_HIGH  = 42   # Evergreen Forest (>80% conifer)
 
-# Pixels with this NLCD class are hard-masked out of training and inference
+# Pixels with this NLCD class are permitted in training and inference
 NLCD_INCLUDE_CLASSES = [NLCD_DECIDUOUS_HIGH, NLCD_MIXED_FOREST]
 
 # ---------------------------------------------------------------------------
@@ -250,8 +250,7 @@ SYNTHETIC_NO_TRANSITION_WINDOW = ((8, 1),  (8, 20))
 SYNTHETIC_LATE_WINDOW          = ((11, 10), (11, 30))
 
 # Minimum fraction of the patch (C, H, W) that must be deciduous or mixed
-# forest in the NLCD layer. The centre-pixel NLCD check catches sites in
-# non-forest land cover, but at 250m resolution a centre pixel can pass
+# forest in the NLCD layer. At 250m resolution, a priori a patch can pass
 # while the surrounding patch is dominated by urban or agricultural land
 # (e.g. an isolated park in a dense city). A patch-level threshold catches
 # these cases. 0.25 = at least 1/4 of the 32x32 patch must be forest.

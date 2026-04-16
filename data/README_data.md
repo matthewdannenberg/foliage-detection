@@ -50,7 +50,7 @@ Data Downloading and Initial Processing Instructions
 
 4)  Landsat ARD Data
         Programmatically found, preprocessed, and downloaded by preprocess_landsat.py
-            -   most recently downloaded on 4/2/2026
+            -   most recently downloaded on 4/15/2026
         Data located using STAC queries, then preprocessed and downloaded from the usgs-landsat AWS S3 bucket (requester pays). Setting up local AWS authentication in advance is required.
         By default, data limited to 
             tiles in the northeast containing observations (ard_tile_list.txt is required for this purpose), 

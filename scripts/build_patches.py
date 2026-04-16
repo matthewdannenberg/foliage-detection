@@ -386,9 +386,6 @@ def extract_observer_patches(
             if not in_bounds:
                 skipped["out_of_bounds"] += 1
                 continue
-            if exclusion_mask[px_row, px_col]:
-                skipped["nlcd_excluded"] += 1
-                continue
 
             # For observer patches: only reject if the centre pixel itself
             # is NaN. Context pixels with NaN (cloud edges etc.) are filled
