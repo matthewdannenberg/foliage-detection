@@ -153,7 +153,7 @@ def _is_valid_patch(
     half: int,
     exclusion_mask: np.ndarray,
 ) -> bool:
-    """Return True if a patch centred at (row, col) is usable."""
+    """Return True if a patch centered at (row, col) is usable."""
     _, H, W = cube.shape
     if row < half or row >= H - half or col < half or col >= W - half:
         return False
@@ -173,7 +173,7 @@ def _extract_patch(cube: np.ndarray, row: int, col: int, half: int) -> np.ndarra
 def _fill_nan(patch: np.ndarray) -> np.ndarray:
     """Fill NaN values in a (C, H, W) patch with per-channel mean of valid pixels.
 
-    Only applied to observer patches where the centre pixel is valid but
+    Only applied to observer patches where the center pixel is valid but
     surrounding context pixels may be cloud-masked. The fill value is
     spectrally neutral — the channel mean of whatever valid pixels exist
     in the patch. Falls back to 0.0 if an entire channel is NaN.
@@ -219,7 +219,7 @@ def _rowcol_to_lonlat(
 ) -> tuple[float, float]:
     """Convert pixel (row, col) on the 250m grid to WGS84 (lon, lat).
 
-    Inverse of _lonlat_to_rowcol. Returns the centre of the pixel.
+    Inverse of _lonlat_to_rowcol. Returns the center of the pixel.
     """
     x = transform.c + (col + 0.5) * transform.a
     y = transform.f + (row + 0.5) * transform.e
@@ -285,8 +285,8 @@ def extract_observer_patches(
       3. Extract one patch per consolidated location.
 
     Filters applied per patch:
-      - Centre pixel must pass NLCD exclusion mask
-      - Centre pixel spectral channels must not be NaN
+      - center pixel must pass NLCD exclusion mask
+      - center pixel spectral channels must not be NaN
       - Patch-level deciduous fraction >= PATCH_MIN_DECIDUOUS_FRACTION
       - Each USA-NPN site (snapped lat/lon) capped at MAX_PATCHES_PER_SITE total
       - PhenoCam sites are uncapped — temporal diversity within a site is the value
@@ -415,15 +415,7 @@ def extract_observer_patches(
                 skipped["out_of_bounds"] += 1
                 continue
 
-            # For observer patches: only reject if the centre pixel itself
-            # is NaN. Context pixels with NaN (cloud edges etc.) are filled
-            # with per-channel mean rather than discarding the whole patch.
-            centre_spectral = cube[:9, px_row, px_col]
-            if np.isnan(centre_spectral).any():
-                skipped["centre_nan"] += 1
-                continue
-
-            # Patch-level deciduous fraction check. The centre-pixel NLCD
+            # Patch-level deciduous fraction check. The center-pixel NLCD
             # filter passes sites like isolated urban parks where the
             # surrounding patch is dominated by impervious surfaces. Require
             # that at least PATCH_MIN_DECIDUOUS_FRACTION of the patch is
