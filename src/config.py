@@ -246,8 +246,8 @@ SYNTHETIC_LATE_CONFIDENCE          = 0.80   # Nov 10–30: high confidence, some
 # Date windows for synthetic label generation (inclusive, month/day tuples)
 # August 1–20: foliage virtually never changing → no_transition
 SYNTHETIC_NO_TRANSITION_WINDOW = ((8, 1),  (8, 20))
-# November 10–30: well past peak, significant leaf drop → late
-SYNTHETIC_LATE_WINDOW          = ((11, 10), (11, 30))
+# November 15–30: well past peak, significant leaf drop → late
+SYNTHETIC_LATE_WINDOW          = ((11, 15), (11, 30))
 
 # Minimum fraction of the patch (C, H, W) that must be deciduous or mixed
 # forest in the NLCD layer. At 250m resolution, a priori a patch can pass
@@ -258,7 +258,7 @@ PATCH_MIN_DECIDUOUS_FRACTION = 0.25
 
 # Maximum fraction of the patch (C, H, W) that may be masked, containing NaN
 # values. When NaN values are found, they are filled with mean values from the surroundings.
-MAX_NAN_FRACTION = .5
+MAX_NAN_FRACTION = 0.5
 
 # Maximum number of patches that any single NPN site (identified by snapped
 # lat/lon) may contribute across all years and stages. Without a cap, a

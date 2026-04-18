@@ -472,6 +472,39 @@ def extract_observer_patches(
                 "longitude":    patch_lon,
             })
 
+            # Neighbourhood augmentation — extract one patch per adjacent pixel
+            # (N, NE, E, SE, S, SW, W, NW). Each shift is one 250m pixel,
+            # so the centre moves to a neighbouring location while the label
+            # is assumed to hold. Confidence is multiplied by 0.95 to reflect
+            # the small added uncertainty from the spatial offset.
+            for dr, dc in [(-1, 0), (-1, 1), (0, 1), (1, 1),
+                           (1, 0), (1, -1), (0, -1), (-1, -1)]:
+                nr, nc = px_row + dr, px_col + dc
+                # Check shifted centre is within tile bounds
+                if not (half <= nr < H - half and half <= nc < W - half):
+                    continue
+                # Check deciduous fraction at shifted location
+                decid_shifted = deciduous_fraction[
+                    nr - half: nr + half,
+                    nc - half: nc + half,
+                ]
+                if decid_shifted.mean() < PATCH_MIN_DECIDUOUS_FRACTION:
+                    continue
+                shifted_patch = _fill_nan(_extract_patch(cube, nr, nc, half))
+                if shifted_patch is None:
+                    continue
+                shift_lon, shift_lat = _rowcol_to_lonlat(nr, nc, transform)
+                records.append({
+                    "patch":        shifted_patch,
+                    "stage":        stage,
+                    "confidence":   round(confidence * 0.95, 4),
+                    "year":         year,
+                    "source":       source,
+                    "label_source": "observer_shifted",
+                    "latitude":     shift_lat,
+                    "longitude":    shift_lon,
+                })
+
     print(f"  Tiles with nearby observations: {tiles_with_obs}")
     print(f"  Observer patches extracted: {len(records)}")
     if skipped:
@@ -835,6 +868,10 @@ def main() -> None:
             observer_stage_counts.get(STAGES["early"], 0),
             observer_stage_counts.get(STAGES["peak"],  0),
         )
+        max_synth_class_count = min(
+            observer_stage_counts.get(STAGES["no_transition"], 0),
+            observer_stage_counts.get(STAGES["late"],  0),
+        )
 
         if args.max_synthetic is not None:
             max_synthetic = args.max_synthetic
@@ -846,7 +883,10 @@ def main() -> None:
             )
             max_synthetic = 500
         else:
-            max_synthetic = max(minority_count * 5, 200)
+            max_synthetic = max(
+                                min(max_synth_class_count, minority_count * 5), 
+                                200
+                                )
 
         print(f"\n[build] Synthetic cap: {max_synthetic} patches per class "
               f"(minority observer count: {minority_count})")
