@@ -190,6 +190,13 @@ def _fill_nan(patch: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Module-level coordinate transformers — created once, reused everywhere
+# ---------------------------------------------------------------------------
+_WGS84_TO_ALBERS = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+_ALBERS_TO_WGS84 = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True)
+
+
+# ---------------------------------------------------------------------------
 # Coordinate → pixel conversion
 # ---------------------------------------------------------------------------
 
@@ -199,8 +206,7 @@ def _lonlat_to_rowcol(
     transform,
 ) -> tuple[int, int]:
     """Convert WGS84 lon/lat to pixel (row, col) on the 250m grid."""
-    transformer = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
-    x, y = transformer.transform(lon, lat)
+    x, y = _WGS84_TO_ALBERS.transform(lon, lat)
     col = int((x - transform.c) / transform.a)
     row = int((y - transform.f) / transform.e)
     return row, col
@@ -217,8 +223,7 @@ def _rowcol_to_lonlat(
     """
     x = transform.c + (col + 0.5) * transform.a
     y = transform.f + (row + 0.5) * transform.e
-    transformer = Transformer.from_crs(TARGET_CRS, "EPSG:4326", always_xy=True)
-    lon, lat = transformer.transform(x, y)
+    lon, lat = _ALBERS_TO_WGS84.transform(x, y)
     return lon, lat
 
 
@@ -298,6 +303,20 @@ def extract_observer_patches(
     # Key: (lat_snapped, lon_snapped) tuple
     site_patch_counts: Counter = Counter()
 
+    # Pre-index observations by year for O(1) year lookup instead of
+    # scanning all observations for every tile
+    obs_by_year: dict[int, pd.DataFrame] = {}
+    for yr, grp in observations.groupby(observations["date"].apply(lambda d: d.year)):
+        obs_by_year[yr] = grp.reset_index(drop=True)
+
+    # Cache DEM and NLCD arrays keyed by (tile_grid_id, year) so tiles at the
+    # same ARD grid position (same transform/shape) sharing data across dates
+    # don't reproject the DEM or reproject NLCD repeatedly.
+    # tile_grid_id is derived from the transform tuple — same ARD H/V position
+    # always has the same transform.
+    dem_grid_cache:   dict[tuple, np.ndarray] = {}  # transform_key → elevation
+    nlcd_grid_cache:  dict[tuple, tuple]      = {}  # (transform_key, year) → (excl, decid)
+
     # Collect all unique tile paths sorted by date for clean progress display
     all_tile_paths = sorted(
         {p for paths in tile_index.values() for p in paths},
@@ -317,25 +336,24 @@ def extract_observer_patches(
 
         year = tile_date.year
 
-        # Find observations near this tile in time
-        tile_obs = _observations_for_tile(tile_date, observations)
+        # Find observations near this tile — use year-indexed subset
+        year_obs = obs_by_year.get(year, pd.DataFrame())
+        if year_obs.empty:
+            continue
+        tile_obs = _observations_for_tile(tile_date, year_obs)
         if tile_obs.empty:
             continue
 
-        # Spatial filter — keep only observations whose coordinates fall
-        # within this tile's bounding box. Read bounds without loading data.
+        # Read tile metadata and spectral data in a single open
         with rasterio.open(tile_path) as src:
             bounds    = src.bounds
             transform = src.transform
             H, W      = src.height, src.width
+            spectral  = src.read().astype(np.float32)   # (9, H, W)
 
-        # Convert tile bounds from EPSG:5070 to WGS84 for comparison
-        # with observation lat/lon (which are in WGS84)
-        _bounds_transformer = Transformer.from_crs(
-            TARGET_CRS, "EPSG:4326", always_xy=True
-        )
-        left_lon,  bottom_lat = _bounds_transformer.transform(bounds.left,  bounds.bottom)
-        right_lon, top_lat    = _bounds_transformer.transform(bounds.right, bounds.top)
+        # Convert tile bounds to WGS84 using module-level transformer
+        left_lon,  bottom_lat = _ALBERS_TO_WGS84.transform(bounds.left,  bounds.bottom)
+        right_lon, top_lat    = _ALBERS_TO_WGS84.transform(bounds.right, bounds.top)
 
         spatial_mask = (
             (tile_obs["latitude"]  >= bottom_lat) &
@@ -354,18 +372,28 @@ def extract_observer_patches(
 
         tiles_with_obs += 1
 
-        # Load spectral data (bounds/transform already read above)
-        with rasterio.open(tile_path) as src:
-            spectral = src.read().astype(np.float32)   # (9, H, W)
+        # Cache key based on transform (uniquely identifies the tile grid)
+        transform_key = (transform.c, transform.f, transform.a, transform.e, H, W)
 
-        nlcd = nlcd_cache.setdefault(year, NLCDLayer(year))
-        exclusion_mask     = nlcd.exclusion_mask(transform, (H, W))
-        deciduous_fraction = nlcd.deciduous_fraction(transform, (H, W))
-        elevation          = _load_dem_for_grid(dem_path, transform, (H, W))
-        slope, aspect      = _slope_aspect(elevation)
-        cube               = _build_cube(
-            spectral, elevation, slope, aspect, deciduous_fraction
-        )
+        # DEM — reproject once per unique grid position
+        if transform_key not in dem_grid_cache:
+            dem_grid_cache[transform_key] = _load_dem_for_grid(
+                dem_path, transform, (H, W)
+            )
+        elevation = dem_grid_cache[transform_key]
+        slope, aspect = _slope_aspect(elevation)
+
+        # NLCD — reproject once per (grid position, year)
+        nlcd_key = (transform_key, year)
+        if nlcd_key not in nlcd_grid_cache:
+            nlcd = nlcd_cache.setdefault(year, NLCDLayer(year))
+            nlcd_grid_cache[nlcd_key] = (
+                nlcd.exclusion_mask(transform, (H, W)),
+                nlcd.deciduous_fraction(transform, (H, W)),
+            )
+        exclusion_mask, deciduous_fraction = nlcd_grid_cache[nlcd_key]
+
+        cube = _build_cube(spectral, elevation, slope, aspect, deciduous_fraction)
 
         # Extract one patch per consolidated observation location
         for _, obs_row in consolidated.iterrows():
@@ -494,6 +522,10 @@ def generate_synthetic_patches(
         STAGES["late"]:          [],
     }
 
+    # DEM and NLCD caches keyed by grid position — same as observer loop
+    dem_grid_cache:  dict[tuple, np.ndarray] = {}
+    nlcd_grid_cache: dict[tuple, tuple]      = {}
+
     # Collect all eligible tiles per stage
     eligible: dict[int, list[Path]] = {
         STAGES["no_transition"]: [],
@@ -539,11 +571,23 @@ def generate_synthetic_patches(
                 transform = src.transform
                 H, W      = src.height, src.width
 
-            nlcd = nlcd_cache.setdefault(year, NLCDLayer(year))
-            exclusion_mask     = nlcd.exclusion_mask(transform, (H, W))
-            deciduous_fraction = nlcd.deciduous_fraction(transform, (H, W))
-            elevation          = _load_dem_for_grid(dem_path, transform, (H, W))
-            slope, aspect      = _slope_aspect(elevation)
+            transform_key = (transform.c, transform.f, transform.a, transform.e, H, W)
+
+            if transform_key not in dem_grid_cache:
+                dem_grid_cache[transform_key] = _load_dem_for_grid(
+                    dem_path, transform, (H, W)
+                )
+            elevation = dem_grid_cache[transform_key]
+            slope, aspect = _slope_aspect(elevation)
+
+            nlcd_key = (transform_key, year)
+            if nlcd_key not in nlcd_grid_cache:
+                nlcd = nlcd_cache.setdefault(year, NLCDLayer(year))
+                nlcd_grid_cache[nlcd_key] = (
+                    nlcd.exclusion_mask(transform, (H, W)),
+                    nlcd.deciduous_fraction(transform, (H, W)),
+                )
+            exclusion_mask, deciduous_fraction = nlcd_grid_cache[nlcd_key]
 
             cube = _build_cube(spectral, elevation, slope, aspect, deciduous_fraction)
 
