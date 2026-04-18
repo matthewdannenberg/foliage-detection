@@ -60,6 +60,7 @@ from config import (
     CONSOLIDATION_COORD_DECIMALS,
     DATA_RAW,
     DATA_PROCESSED,
+    MAX_NAN_FRACTION,
     MAX_PATCHES_PER_SITE,
     NORM_STATS_PATH,
     NUM_CHANNELS,
@@ -153,7 +154,7 @@ def _is_valid_patch(
     half: int,
     exclusion_mask: np.ndarray,
 ) -> bool:
-    """Return True if a patch centered at (row, col) is usable."""
+    """Return True if a patch centred at (row, col) is usable."""
     _, H, W = cube.shape
     if row < half or row >= H - half or col < half or col >= W - half:
         return False
@@ -170,22 +171,33 @@ def _extract_patch(cube: np.ndarray, row: int, col: int, half: int) -> np.ndarra
     return cube[:, row - half: row + half, col - half: col + half].copy()
 
 
-def _fill_nan(patch: np.ndarray) -> np.ndarray:
+def _fill_nan(patch: np.ndarray,
+              max_nan_fraction: float = MAX_NAN_FRACTION) -> np.ndarray | None:
     """Fill NaN values in a (C, H, W) patch with per-channel mean of valid pixels.
 
-    Only applied to observer patches where the center pixel is valid but
-    surrounding context pixels may be cloud-masked. The fill value is
-    spectrally neutral — the channel mean of whatever valid pixels exist
-    in the patch. Falls back to 0.0 if an entire channel is NaN.
+    Applied to observer patches where context pixels may be cloud-masked.
+    Returns None if any spectral channel (0–8) has more than max_nan_fraction
+    of its pixels as NaN — these patches are too corrupted to be useful and
+    would otherwise produce misleading fill values or trigger the 'mean of
+    empty slice' warning.
 
-    Synthetic patches use strict NaN rejection instead and never reach this.
+    For channels where some but not too many pixels are NaN, fills with the
+    per-channel mean of the valid pixels in that patch.
     """
     patch = patch.copy()
+    n_pixels = patch.shape[1] * patch.shape[2]
+
     for c in range(patch.shape[0]):
         nan_mask = np.isnan(patch[c])
-        if nan_mask.any():
-            valid_mean = np.nanmean(patch[c])
-            patch[c][nan_mask] = valid_mean if np.isfinite(valid_mean) else 0.0
+        if not nan_mask.any():
+            continue
+        nan_frac = nan_mask.sum() / n_pixels
+        # Reject the whole patch if any spectral channel is too sparse
+        if c < 9 and nan_frac > max_nan_fraction:
+            return None
+        valid_mean = np.nanmean(patch[c])
+        patch[c][nan_mask] = valid_mean if np.isfinite(valid_mean) else 0.0
+
     return patch
 
 
@@ -444,6 +456,10 @@ def extract_observer_patches(
             site_patch_counts[site_key] += 1
 
             patch = _fill_nan(_extract_patch(cube, px_row, px_col, half))
+            if patch is None:
+                skipped["excessive_nan"] += 1
+                site_patch_counts[site_key] -= 1  # undo the increment
+                continue
             patch_lon, patch_lat = _rowcol_to_lonlat(px_row, px_col, transform)
             records.append({
                 "patch":        patch,
