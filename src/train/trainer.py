@@ -143,10 +143,15 @@ class Trainer:
                 train_ds = loaders["train"].dataset
                 class_weights = train_ds.class_weights()
             self.class_weights = class_weights.to(self.device)
-            self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+            self.criterion = nn.CrossEntropyLoss(
+                weight=self.class_weights,
+                reduction="none",
+                label_smoothing=cfg.get("label_smoothing", 0.1),
+            )
         else:
             self.criterion = nn.CrossEntropyLoss(
-                label_smoothing=cfg.get("label_smoothing", 0.1)
+                reduction="none",
+                label_smoothing=cfg.get("label_smoothing", 0.1),
             )
         self.optimiser = AdamW(
             self.model.parameters(),
@@ -254,13 +259,19 @@ class Trainer:
         total_loss = 0.0
         all_preds, all_labels = [], []
 
-        for patches, labels in self.loaders["train"]:
-            patches = patches.to(self.device)
-            labels  = labels.to(self.device)
+        for patches, labels, confidence in self.loaders["train"]:
+            patches    = patches.to(self.device)
+            labels     = labels.to(self.device)
+            confidence = confidence.to(self.device)
 
             self.optimiser.zero_grad(set_to_none=True)
             logits = self.model(patches)
-            loss   = self.criterion(logits, labels)
+
+            # Per-sample loss weighted by label confidence.
+            # Higher-confidence labels (observer originals) contribute more
+            # to the gradient than lower-confidence ones (shifted, synthetic).
+            per_sample_loss = self.criterion(logits, labels)   # (B,)
+            loss = (per_sample_loss * confidence).mean()
             loss.backward()
 
             # Gradient clipping prevents exploding gradients in edge cases
@@ -285,12 +296,13 @@ class Trainer:
         total_loss = 0.0
         all_preds, all_labels = [], []
 
-        for patches, labels in self.loaders[split]:
+        for patches, labels, confidence in self.loaders[split]:
             patches = patches.to(self.device)
             labels  = labels.to(self.device)
 
             logits = self.model(patches)
-            loss   = self.criterion(logits, labels)
+            # For evaluation use unweighted mean loss for a stable metric
+            loss   = self.criterion(logits, labels).mean()
 
             total_loss += loss.item() * len(labels)
             all_preds.append(logits.argmax(dim=1).cpu().numpy())
@@ -317,11 +329,11 @@ class Trainer:
         all_preds, all_labels = [], []
 
         with torch.no_grad():
-            for patches, labels in self.loaders[split]:
+            for patches, labels, confidence in self.loaders[split]:
                 patches = patches.to(self.device)
                 labels  = labels.to(self.device)
                 logits  = self.model(patches)
-                loss    = self.criterion(logits, labels)
+                loss    = self.criterion(logits, labels).mean()
                 total_loss += loss.item() * len(labels)
                 all_preds.append(logits.argmax(dim=1).cpu().numpy())
                 all_labels.append(labels.cpu().numpy())

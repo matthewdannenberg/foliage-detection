@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "foliage"
-version = "0.1.2"
+version = "0.2.0"
 
 [tool.setuptools.packages.find]
 where = ["src"]

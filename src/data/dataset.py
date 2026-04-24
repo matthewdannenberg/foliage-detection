@@ -151,9 +151,10 @@ class FoliagePatchDataset(Dataset):
     def __len__(self) -> int:
         return len(self.indices)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         archive_idx = int(self.indices[idx])
         label       = int(self.labels[idx])
+        confidence  = float(self.confidence[idx])
 
         with h5py.File(self.hdf5_path, "r") as f:
             patch = f["patches"][archive_idx].astype(np.float32)  # (C, H, W)
@@ -166,7 +167,9 @@ class FoliagePatchDataset(Dataset):
         if self.transform is not None:
             patch_t = self.transform(patch_t)
 
-        return patch_t, torch.tensor(label, dtype=torch.long)
+        return (patch_t,
+                torch.tensor(label, dtype=torch.long),
+                torch.tensor(confidence, dtype=torch.float32))
 
     def class_weights(self) -> torch.Tensor:
         """Inverse-frequency class weights for weighted cross-entropy loss.
