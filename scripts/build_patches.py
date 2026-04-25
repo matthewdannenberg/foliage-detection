@@ -466,6 +466,7 @@ def extract_observer_patches(
                 "stage":        stage,
                 "confidence":   confidence,
                 "year":         year,
+                "date":         tile_date.isoformat(),
                 "source":       source,
                 "label_source": "observer",
                 "latitude":     patch_lat,
@@ -499,6 +500,7 @@ def extract_observer_patches(
                     "stage":        stage,
                     "confidence":   round(confidence * 0.95, 4),
                     "year":         year,
+                    "date":         tile_date.isoformat(),
                     "source":       source,
                     "label_source": "observer_shifted",
                     "latitude":     shift_lat,
@@ -667,6 +669,7 @@ def generate_synthetic_patches(
                     "stage":        stage_idx,
                     "confidence":   confidence,
                     "year":         year,
+                    "date":         td.isoformat(),
                     "source":       "synthetic",
                     "label_source": f"synthetic_{stage_name}",
                     "latitude":     patch_lat,
@@ -692,8 +695,9 @@ def write_hdf5(records: list[dict], out_path: Path) -> None:
         /labels       (N,)         int64
         /confidence   (N,)         float32
         /years        (N,)         int32
-        /latitudes    (N,)         float32  (NaN for synthetic patches)
-        /longitudes   (N,)         float32  (NaN for synthetic patches)
+        /dates        (N,)         variable-length string  (ISO YYYY-MM-DD)
+        /latitudes    (N,)         float32
+        /longitudes   (N,)         float32
         /label_source (N,)         variable-length string
         /metadata     JSON string
     """
@@ -706,6 +710,7 @@ def write_hdf5(records: list[dict], out_path: Path) -> None:
     years        = np.array([r["year"]       for r in records], dtype=np.int32)
     latitudes    = np.array([r["latitude"]   for r in records], dtype=np.float32)
     longitudes   = np.array([r["longitude"]  for r in records], dtype=np.float32)
+    dates        = [r["date"]                for r in records]
     label_source = [r["label_source"]        for r in records]
 
     metadata = json.dumps({
@@ -728,8 +733,11 @@ def write_hdf5(records: list[dict], out_path: Path) -> None:
         f.create_dataset("latitudes",  data=latitudes)
         f.create_dataset("longitudes", data=longitudes)
 
-        # Variable-length strings for label_source
         dt = h5py.special_dtype(vlen=str)
+
+        ds = f.create_dataset("dates", (N,), dtype=dt)
+        ds[:] = dates
+
         ds = f.create_dataset("label_source", (N,), dtype=dt)
         ds[:] = label_source
 
